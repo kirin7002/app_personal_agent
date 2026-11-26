@@ -17,7 +17,7 @@ git diff --check
 
 ## 真实音频探针
 
-服务端环境需配置 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID`。可选 `DASHSCOPE_REGION`（默认 `cn-beijing`）和 `DASHSCOPE_MODEL`。使用实际普通话录音，说明示例期待读到关窗指令和一段普通对话。
+服务端环境需配置 `DASHSCOPE_API_KEY`。通过 `DASHSCOPE_WORKSPACE_ID` 使用专属域名，缺省时北京和新加坡支持区域域名。可选 `DASHSCOPE_REGION`（默认 `cn-beijing`）和 `DASHSCOPE_MODEL`。使用实际普通话录音，说明示例期待读到关窗指令和一段普通对话。
 
 ```sh
 ffmpeg -i car.wav -f s16le -ac 1 -ar 16000 car.pcm
@@ -29,4 +29,4 @@ go run ./cmd/qwen-probe -car car.pcm -chat chat.pcm -out interrupted.pcm -cancel
 
 探针报告握手、会话配置确认、两次最终转写和首帧音频。只有两个不同的输入项均已收到最终转写，才为后一项发送 `response.create`。使用 `-cancel-after-first` 检查取消终态。录音和音频输出放在工作树外。
 
-真实验证状态为等待百炼凭据及业务空间。当前会话缺少所需配置，探针在配置检查阶段退出。真实最终转写先于生成、音频质检和服务延迟待采集。
+真实探针已通过北京区域域名验证。转写、出声、取消及时延结果见 [H07 联调报告](h07-end-to-end.md#百炼独立实测)。

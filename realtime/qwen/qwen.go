@@ -38,8 +38,8 @@ type Factory struct {
 }
 
 func New(config Config) (*Factory, error) {
-	if config.APIKey == "" || !dnsLabel.MatchString(config.WorkspaceID) {
-		return nil, errors.New("DASHSCOPE_API_KEY and a valid DASHSCOPE_WORKSPACE_ID are required")
+	if config.APIKey == "" {
+		return nil, errors.New("DASHSCOPE_API_KEY is required")
 	}
 	if config.Region == "" {
 		config.Region = "cn-beijing"
@@ -50,9 +50,25 @@ func New(config Config) (*Factory, error) {
 	if config.Model == "" {
 		config.Model = Model
 	}
+	host := ""
+	if config.WorkspaceID != "" {
+		if !dnsLabel.MatchString(config.WorkspaceID) {
+			return nil, errors.New("invalid DashScope workspace ID")
+		}
+		host = config.WorkspaceID + "." + config.Region + ".maas.aliyuncs.com"
+	} else {
+		switch config.Region {
+		case "cn-beijing":
+			host = "dashscope.aliyuncs.com"
+		case "ap-southeast-1":
+			host = "dashscope-intl.aliyuncs.com"
+		default:
+			return nil, errors.New("DASHSCOPE_WORKSPACE_ID is required for this region")
+		}
+	}
 	endpoint := url.URL{
 		Scheme:   "wss",
-		Host:     config.WorkspaceID + "." + config.Region + ".maas.aliyuncs.com",
+		Host:     host,
 		Path:     "/api-ws/v1/realtime",
 		RawQuery: url.Values{"model": {config.Model}}.Encode(),
 	}
@@ -185,8 +201,13 @@ func (f *Factory) Connect(ctx context.Context) (contract.S2SSession, error) {
 		"session": map[string]any{
 			"modalities": []string{"text", "audio"}, "voice": voice,
 			"input_audio_format": "pcm", "output_audio_format": "pcm",
-			"input_audio_transcription": map[string]string{"language": "zh"},
-			"turn_detection":            nil,
+			"input_audio_transcription": map[string]any{
+				"language": "zh",
+				"corpus": map[string]any{"vocabulary": map[string]int{
+					"左前窗": 5, "右前窗": 5, "左后窗": 5, "右后窗": 5,
+				}},
+			},
+			"turn_detection": nil,
 		},
 	}
 	if err := wsjson.Write(ctx, conn, config); err != nil {
