@@ -1,13 +1,13 @@
 # Hermes 语音车控任务设计
 
-车端收发音频，阿里云百炼 Qwen-Omni-Realtime 负责前端 S2S 语音交互。Go 语音网关通过 WebSocket 接入百炼、管理语音轮次和播报，并把车辆相关的最终转写交给 Hermes。Hermes 理解车控意图、发起追问和调用 MCP。Go 车控服务持久化任务、提供待回复上下文、校验参数、下发命令并确认执行结果。
+车端收发音频，阿里云百炼 Qwen-Audio-3.1-Realtime-Flash 负责前端 S2S 语音交互。Go 语音网关通过 WebSocket 接入百炼、管理语音轮次和播报，并把车辆相关的最终转写交给 Hermes。Hermes 理解车控意图、发起追问和调用 MCP。Go 车控服务持久化任务、提供待回复上下文、校验参数、下发命令并确认执行结果。
 
 ## 0. 车端 S2S 语音入口
 
 ```mermaid
 flowchart TD
     car[车端麦克风与扬声器] <-->|音频流| voice[Go 语音网关]
-    voice <-->|实时音频与转写事件| s2s[百炼 Qwen-Omni-Realtime]
+    voice <-->|实时音频与转写事件| s2s[百炼 Qwen Audio Realtime 3.1 Flash]
     voice <-->|车控文本与回复| hermes[Hermes]
     hermes -->|六个车辆工具| mcp[Go 车控 MCP]
     mcp -->|任务与指令| vehicle[任务库与车辆执行器]
@@ -35,21 +35,20 @@ Go 用同一轮的最终输入转写做分流和车控校验。部分转写可�
 
 ### 阿里云百炼 WebSocket 接口
 
-首期默认模型为 `qwen3.8-omni-flash-realtime`。北京环境示例为 `wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen3.8-omni-flash-realtime`。该型号使用业务空间专属域名。地域与业务空间可配置，Go 用对应的百炼 API Key 在握手时设置 `Authorization: Bearer <API_KEY>`，密钥由 Go 服务端持有。[百炼 WebSocket 接入](https://help.aliyun.com/zh/model-studio/omni-realtime-websocket-access) · [模型说明](https://help.aliyun.com/zh/model-studio/qwen3-8-omni-flash-realtime)
+首期模型为 `qwen-audio-3.1-realtime-flash`。北京环境示例为 `wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime?model=qwen-audio-3.1-realtime-flash`。采用百炼推荐的业务空间专属域名，按地域配置 Workspace ID 和 API Key。Go 在握手时设置 `Authorization: Bearer <API_KEY>`，密钥由 Go 服务端持有。[百炼 Qwen-Audio-Realtime WebSocket 接入](https://help.aliyun.com/zh/model-studio/audio-realtime-websocket-access) · [3.1 Flash 模型说明](https://help.aliyun.com/zh/model-studio/qwen-audio-3-1-realtime-flash)
 
-Go 收到 `session.created` 后发送如下会话配置，等待 `session.updated` 确认后才向车端发出 `session.ready`。首期使用 Manual 模式，车端或 Go 通过本地 VAD 或按键结束事件确定说话结束。Go 可以先取得最终转写再分流，仅在普通对话时触发 Qwen 出声。
+Go 收到 `session.created` 后发送如下会话配置，等待 `session.updated` 确认后才向车端发出 `session.ready`。首期使用百炼的 push-to-talk 协议模式，车端或 Go 仍可用本地 VAD 自动提交，也可用按键结束事件提交。设计要求先取得最终转写再分流，仅在普通对话时触发 Qwen 出声。H09 首先用真实连接验证百炼能在 `response.create` 之前返回已提交音频的最终转写。
 
 ```json
 {
   "type": "session.update",
   "session": {
     "modalities": ["text", "audio"],
-    "turn_detection": null,
-    "input_audio_transcription": {"model": "qwen3-asr-flash-realtime"},
-    "audio": {
-      "input": {"format": {"type": "pcm", "sample_rate": 16000}},
-      "output": {"voice": "Tina"}
-    }
+    "voice": "longanqian_v3.1",
+    "input_audio_format": "pcm",
+    "output_audio_format": "pcm",
+    "input_audio_transcription": {"language": "zh"},
+    "turn_detection": null
   }
 }
 ```
@@ -59,9 +58,9 @@ Go 收到 `session.created` 后发送如下会话配置，等待 `session.update
 | 输入与提交 | 将单声道 16 kHz、16-bit 小端的裸 PCM 分片以 Base64 放入 `input_audio_buffer.append` 事件的 `audio` 字段。本轮结束只发送一次 `input_audio_buffer.commit`。 | `input_audio_buffer.committed` 返回 `item_id`。Go 将该音频项与当前连接代数和 `voice_turn_id` 关联。 |
 | 转写与分流 | 等待同一 `item_id` 的最终转写。 | `conversation.item.input_audio_transcription.completed` 的 `transcript` 映射到内部 `FinalTranscript`。`delta` 仅用于预览。空转写、`conversation.item.input_audio_transcription.failed` 或超时走重说流程。 |
 | 普通对话 | 分流结果为普通对话时发送 `response.create`。车辆相关轮次交 Hermes。 | 按 `response.created` 分配的 `response.id` 关联同轮 `response.audio.delta`，解码 PCM 音频并流式播放，处理 `response.done` 的终态。输出按 24 kHz PCM 接入，H09 实测确认。 |
-| 打断 | 用户起讲时先停止车端播放。如果百炼仍在生成，发送 `response.cancel`。 | Go 丢弃旧播放代数和旧响应 ID 的后续音频。取消未收敛时按连接恢复流程处理，再触发下一轮生成。 |
+| 打断 | 用户起讲时先停止车端播放。如果百炼仍在生成，发送 `response.cancel`。 | 用 `response.done` 的 `cancelled` 终态收敛当前响应。Go 丢弃旧播放代数和旧响应 ID 的后续音频。取消未收敛时按连接恢复流程处理，再触发下一轮生成。 |
 
-握手、`session.created`、`session.updated` 和首段音频分别记录耗时。若等待配置确认期间遇到 `error` 或 WebSocket 关闭，保留阶段、事件 ID 和关闭码供诊断。转写由百炼会话内置的 ASR 生成，Go 用它作为 Hermes 的文本输入。音频交互走双向会话，下文用 `POST /voice/utterances` 模拟转写进入后端编排的边界。[客户端事件](https://help.aliyun.com/zh/model-studio/client-events) · [服务端事件](https://help.aliyun.com/zh/model-studio/server-events)
+握手、`session.created`、`session.updated` 和首段音频分别记录耗时。若等待配置确认期间遇到 `error` 或 WebSocket 关闭，保留阶段、事件 ID 和关闭码供诊断。Go 用百炼会话的最终输入转写作为 Hermes 的文本输入。音频交互走双向会话，下文用 `POST /voice/utterances` 模拟转写进入后端编排的边界。[Qwen-Audio-Realtime 客户端事件](https://help.aliyun.com/zh/model-studio/fun-audiochat-client-events) · [Qwen-Audio-Realtime 服务端事件](https://help.aliyun.com/zh/model-studio/qwen-audio-realtime-server-events)
 
 ## 1. 车控下发流程
 
