@@ -1,0 +1,238 @@
+{
+  "hermes_commit": "72c88037",
+  "model": "deepseek-v4.1-flash-1017",
+  "mcp_protocol_version": "2025-11-25",
+  "checks": {
+    "cancelled_late_call_rejected": true,
+    "idempotency_conflict_409": true,
+    "idempotency_replay": true,
+    "missing_handle_rejected": true,
+    "parallel_multi_user_isolation": true,
+    "scenario_a_run1_create_task": true,
+    "scenario_a_run2_resume_dispatch": true,
+    "scenario_b_dual_candidate_match": true,
+    "sse_disconnect_resubscribe": true,
+    "terminal_polling": true
+  },
+  "scenario_a_run1_output": "你想关哪扇车窗？左前、右前、左后还是右后？",
+  "scenario_a_run2_output": "正在关闭左后车窗。",
+  "scenario_b_output": "正在关闭左后窗。",
+  "observed_tool_names": [
+    "mcp__vehicle__create_vehicle_task",
+    "mcp__vehicle__dispatch_vehicle_command"
+  ],
+  "redacted_traces": [
+    {
+      "events": 8,
+      "output": "你想关哪扇车窗？左前、右前、左后还是右后？",
+      "run_id": "run_7b781a9449414e77be6be7dfb30ff093",
+      "scenario": "A1"
+    },
+    {
+      "events": 5,
+      "output": "正在关闭左后车窗。",
+      "run_id": "run_1d073ead3e3e417b82d4e3fa08e72a4f",
+      "scenario": "A2"
+    },
+    {
+      "events": 5,
+      "output": "正在关闭左后窗。",
+      "run_id": "run_42b707f83ad2437f9cb138972ef9ee8f",
+      "scenario": "B"
+    }
+  ],
+  "observations": [
+    {
+      "timestamp": "2026-11-26T15:51:26.678888Z",
+      "tool_name": "create_vehicle_task",
+      "arguments": {
+        "device": "window",
+        "params": {},
+        "tool": "close"
+      },
+      "header_turn_handle": "TH-A1-***",
+      "header_hermes_session_id": "hermes-U1-S1-VCL1",
+      "meta_turn_handle": "TH-A1-***",
+      "meta_hermes_session_id": "hermes-U1-S1-VCL1",
+      "resolved_scope": {
+        "user_id": "U1",
+        "session_id": "S1",
+        "vehicle_id": "VCL1"
+      },
+      "resolved_request_id": "R1",
+      "is_error": false,
+      "result_payload": {
+        "task_id": "T101",
+        "status": "pending_reply",
+        "missing_fields": [
+          "position"
+        ],
+        "question": "要关哪扇车窗？",
+        "expires_at": "2026-11-26T16:01:26.67889Z"
+      }
+    },
+    {
+      "timestamp": "2026-11-26T15:51:30.512079Z",
+      "tool_name": "dispatch_vehicle_command",
+      "arguments": {
+        "device": "window",
+        "params": {
+          "position": "rear_left"
+        },
+        "task_id": "T101",
+        "tool": "close"
+      },
+      "header_turn_handle": "TH-A2-***",
+      "header_hermes_session_id": "hermes-U1-S1-VCL1",
+      "meta_turn_handle": "TH-A2-***",
+      "meta_hermes_session_id": "hermes-U1-S1-VCL1",
+      "resolved_scope": {
+        "user_id": "U1",
+        "session_id": "S1",
+        "vehicle_id": "VCL1"
+      },
+      "resolved_request_id": "R2",
+      "is_error": false,
+      "result_payload": {
+        "task_id": "T101",
+        "command_id": "C88",
+        "status": "pending_dispatch"
+      }
+    },
+    {
+      "timestamp": "2026-11-26T15:51:34.342179Z",
+      "tool_name": "dispatch_vehicle_command",
+      "arguments": {
+        "device": "window",
+        "params": {
+          "position": "rear_left"
+        },
+        "task_id": "T201",
+        "tool": "close"
+      },
+      "header_turn_handle": "TH-B1-***",
+      "header_hermes_session_id": "hermes-U1-SB-VCL1",
+      "meta_turn_handle": "TH-B1-***",
+      "meta_hermes_session_id": "hermes-U1-SB-VCL1",
+      "resolved_scope": {
+        "user_id": "U1",
+        "session_id": "S_B",
+        "vehicle_id": "VCL1"
+      },
+      "resolved_request_id": "R3",
+      "is_error": false,
+      "result_payload": {
+        "task_id": "T201",
+        "command_id": "C89",
+        "status": "pending_dispatch"
+      }
+    },
+    {
+      "timestamp": "2026-11-26T15:51:37.59495Z",
+      "tool_name": "dispatch_vehicle_command",
+      "arguments": {
+        "device": "hvac",
+        "params": {
+          "power": "on",
+          "temperature_c": 25
+        },
+        "tool": "set_climate"
+      },
+      "header_turn_handle": "TH-PAR***",
+      "header_hermes_session_id": "hermes-PAR-2",
+      "meta_turn_handle": "TH-PAR***",
+      "meta_hermes_session_id": "hermes-PAR-2",
+      "resolved_scope": {
+        "user_id": "U_PAR_2",
+        "session_id": "S_PAR_2",
+        "vehicle_id": "VCL_PAR_2"
+      },
+      "resolved_request_id": "RP2",
+      "is_error": false,
+      "result_payload": {
+        "task_id": "T102",
+        "command_id": "C90",
+        "status": "pending_dispatch"
+      }
+    },
+    {
+      "timestamp": "2026-11-26T15:51:38.646842Z",
+      "tool_name": "dispatch_vehicle_command",
+      "arguments": {
+        "device": "window",
+        "params": {
+          "position": "rear_left"
+        },
+        "tool": "close"
+      },
+      "header_turn_handle": "TH-PAR***",
+      "header_hermes_session_id": "hermes-PAR-1",
+      "meta_turn_handle": "TH-PAR***",
+      "meta_hermes_session_id": "hermes-PAR-1",
+      "resolved_scope": {
+        "user_id": "U_PAR_1",
+        "session_id": "S_PAR_1",
+        "vehicle_id": "VCL_PAR_1"
+      },
+      "resolved_request_id": "RP1",
+      "is_error": false,
+      "result_payload": {
+        "task_id": "T103",
+        "command_id": "C91",
+        "status": "pending_dispatch"
+      }
+    },
+    {
+      "timestamp": "2026-11-26T15:51:42.955069Z",
+      "tool_name": "dispatch_vehicle_command",
+      "arguments": {
+        "device": "window",
+        "params": {
+          "position": "rear_left"
+        },
+        "tool": "close"
+      },
+      "header_turn_handle": "TH-CAN***",
+      "header_hermes_session_id": "hermes-CANCEL-1",
+      "meta_turn_handle": "TH-CAN***",
+      "meta_hermes_session_id": "hermes-CANCEL-1",
+      "resolved_scope": {
+        "user_id": "",
+        "session_id": "",
+        "vehicle_id": ""
+      },
+      "is_error": true,
+      "result_payload": {
+        "code": "TURN_CONTEXT_INVALID",
+        "message": "轮次已失效、已取消或与会话不匹配",
+        "retryable": false
+      }
+    },
+    {
+      "timestamp": "2026-11-26T15:51:47.94522Z",
+      "tool_name": "dispatch_vehicle_command",
+      "arguments": {
+        "device": "window",
+        "params": {
+          "position": "rear_left"
+        },
+        "tool": "close"
+      },
+      "header_turn_handle": "",
+      "header_hermes_session_id": "",
+      "meta_turn_handle": "",
+      "meta_hermes_session_id": "",
+      "resolved_scope": {
+        "user_id": "",
+        "session_id": "",
+        "vehicle_id": ""
+      },
+      "is_error": true,
+      "result_payload": {
+        "code": "TURN_CONTEXT_INVALID",
+        "message": "missing or inconsistent trusted turn metadata",
+        "retryable": false
+      }
+    }
+  ]
+}
