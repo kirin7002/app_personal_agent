@@ -83,10 +83,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = socket.Close(websocket.StatusPolicyViolation, "session or vehicle unavailable")
 		return
 	}
+	receipts, _ := g.Results.(contract.ResultPlaybackReceipts)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	c := &connection{
-		gateway: g, ctx: ctx, cancel: cancel, socket: socket, scope: scope,
+		gateway: g, receipts: receipts, ctx: ctx, cancel: cancel, socket: socket, scope: scope,
 		frames: make(chan contract.CarFrame, 8), work: make(chan jobEvent, 8),
 		signalled: make(map[string]bool), attempted: make(map[string]bool),
 	}
@@ -173,6 +174,13 @@ func (s *sessionState) issued(id string, generation uint64) {
 		}
 	}
 	s.deliveries[id] = delivery{generation: generation, at: now}
+}
+
+func (s *sessionState) canSettle(id string, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.deliveries[id]
+	return ok && current.generation == generation && !current.settled
 }
 
 func (s *sessionState) settle(id string, generation uint64) {

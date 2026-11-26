@@ -150,6 +150,16 @@ func waitEvent(ctx context.Context, conn *websocket.Conn, want string) (event, e
 }
 
 func (f *Factory) Connect(ctx context.Context) (contract.S2SSession, error) {
+	conn, sessionID, err := f.connect(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	session := &session{conn: conn, id: sessionID, done: make(chan struct{})}
+	go session.read()
+	return session, nil
+}
+
+func (f *Factory) connect(ctx context.Context, instructions string) (*websocket.Conn, string, error) {
 	timeout := f.config.Timeout
 	if timeout <= 0 {
 		timeout = 8 * time.Second
@@ -178,18 +188,18 @@ func (f *Factory) Connect(ctx context.Context) (contract.S2SSession, error) {
 		if response != nil {
 			result.HTTPStatus = response.StatusCode
 		}
-		return nil, result
+		return nil, "", result
 	}
 	f.stage("handshake", started)
 	conn.SetReadLimit(1 << 20)
 	created, err := waitEvent(ctx, conn, "session.created")
 	if err != nil {
 		conn.CloseNow()
-		return nil, err
+		return nil, "", err
 	}
 	if strings.TrimSpace(created.Session.ID) == "" {
 		conn.CloseNow()
-		return nil, &ProtocolError{Stage: "session.created", Code: "missing_session_id"}
+		return nil, "", &ProtocolError{Stage: "session.created", Code: "missing_session_id"}
 	}
 	f.stage("session.created", started)
 	voice := f.config.Voice
@@ -197,36 +207,34 @@ func (f *Factory) Connect(ctx context.Context) (contract.S2SSession, error) {
 		voice = "longanqian_v3.1"
 	}
 	config := map[string]any{
-		"type": "session.update",
-		"session": map[string]any{
-			"modalities": []string{"text", "audio"}, "voice": voice,
-			"input_audio_format": "pcm", "output_audio_format": "pcm",
-			"input_audio_transcription": map[string]any{
-				"language": "zh",
-				"corpus": map[string]any{"vocabulary": map[string]int{
-					"左前窗": 5, "右前窗": 5, "左后窗": 5, "右后窗": 5,
-				}},
-			},
-			"turn_detection": nil,
+		"modalities": []string{"text", "audio"}, "voice": voice,
+		"input_audio_format": "pcm", "output_audio_format": "pcm",
+		"input_audio_transcription": map[string]any{
+			"language": "zh",
+			"corpus": map[string]any{"vocabulary": map[string]int{
+				"左前窗": 5, "右前窗": 5, "左后窗": 5, "右后窗": 5,
+			}},
 		},
+		"turn_detection": nil,
 	}
-	if err := wsjson.Write(ctx, conn, config); err != nil {
+	if instructions != "" {
+		config["instructions"] = instructions
+	}
+	if err := wsjson.Write(ctx, conn, map[string]any{"type": "session.update", "session": config}); err != nil {
 		conn.CloseNow()
-		return nil, connectionError("session.update", err)
+		return nil, "", connectionError("session.update", err)
 	}
 	updated, err := waitEvent(ctx, conn, "session.updated")
 	if err != nil {
 		conn.CloseNow()
-		return nil, err
+		return nil, "", err
 	}
 	if updated.Session.ID != "" && updated.Session.ID != created.Session.ID {
 		conn.CloseNow()
-		return nil, &ProtocolError{Stage: "session.updated", Code: "mismatched_session_id"}
+		return nil, "", &ProtocolError{Stage: "session.updated", Code: "mismatched_session_id"}
 	}
 	f.stage("session.updated", started)
-	session := &session{conn: conn, id: created.Session.ID, done: make(chan struct{})}
-	go session.read()
-	return session, nil
+	return conn, created.Session.ID, nil
 }
 
 func (f *Factory) stage(stage string, start time.Time) {

@@ -182,10 +182,11 @@ func (c *carClient) say(id string, pcm []byte, realtime bool) {
 }
 
 type heard struct {
-	playbackID string
-	reply      *contract.SpeechReply
-	result     *contract.VehicleResultEvent
-	pcm        []byte
+	firstAudioAt time.Time
+	playbackID   string
+	reply        *contract.SpeechReply
+	result       *contract.VehicleResultEvent
+	pcm          []byte
 }
 
 func (c *carClient) hear() heard {
@@ -206,6 +207,9 @@ func (c *carClient) hear() heard {
 				c.t.Fatalf("out-of-order playback frame: %+v", frame)
 			}
 			seq = frame.Sequence
+			if seq == 1 {
+				heard.firstAudioAt = time.Now()
+			}
 			heard.pcm = append(heard.pcm, frame.Audio...)
 		case contract.PlaybackStop:
 			if frame.PlaybackID != heard.playbackID || frame.PlaybackGeneration != generation || frame.Reason != "completed" ||

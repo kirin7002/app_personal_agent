@@ -30,3 +30,12 @@ go run ./cmd/qwen-probe -car car.pcm -chat chat.pcm -out interrupted.pcm -cancel
 探针报告握手、会话配置确认、两次最终转写和首帧音频。只有两个不同的输入项均已收到最终转写，才为后一项发送 `response.create`。使用 `-cancel-after-first` 检查取消终态。录音和音频输出放在工作树外。
 
 真实探针已通过北京区域域名验证。转写、出声、取消及时延结果见 [H07 联调报告](h07-end-to-end.md#百炼独立实测)。
+
+
+## 指定文本探针
+
+```sh
+go run ./cmd/qwen-probe -read-text '左后车窗已关闭。' -out read-aloud.pcm
+```
+
+探针在独立会话中写入用户文本，使用 `response.audio_transcript.done` 比对同一响应的字幕，匹配原文且收到音频时保存 PCM。北京区域域名实测字幕为「左后车窗已关闭。」。这是一次指定文本样本验证。车控确认播报使用网关注入的 TTS。[百炼客户端事件](https://help.aliyun.com/zh/model-studio/fun-audiochat-client-events) · [百炼服务端事件](https://help.aliyun.com/zh/model-studio/qwen-audio-realtime-server-events)

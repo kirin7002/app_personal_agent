@@ -162,11 +162,15 @@ func (s *Service) register(ctx context.Context, turn contract.VehicleTurn) (Reco
 	if err != nil {
 		return Record{}, err
 	}
+	expiresAt := now.Add(2 * time.Minute)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expiresAt) {
+		expiresAt = deadline
+	}
 	hermesSession := "vehicle-" + scopeKey(turn.Scope)
 	record := Record{
 		Context: contract.TurnContext{
 			VehicleTurn: turn, HermesSessionID: hermesSession,
-			TurnHandle: rand.Text(), Candidates: versions, ExpiresAt: now.Add(2 * time.Minute),
+			TurnHandle: rand.Text(), Candidates: versions, ExpiresAt: expiresAt,
 		},
 		Payload: runs.StartRequest{
 			SessionID: hermesSession, Input: turn.FinalTranscript.Text,

@@ -11,3 +11,15 @@ CREATE TABLE IF NOT EXISTS voice_turns (
     UNIQUE (scope_key, request_id),
     UNIQUE (turn_handle)
 );
+
+CREATE TABLE IF NOT EXISTS voice_scope_queue (
+    ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_key TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS voice_scope_queue_order
+    ON voice_scope_queue (scope_key, ticket_id);
+
+CREATE INDEX IF NOT EXISTS voice_scope_queue_expiration
+    ON voice_scope_queue (expires_at);

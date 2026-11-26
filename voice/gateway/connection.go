@@ -51,6 +51,7 @@ type playback struct {
 
 type connection struct {
 	gateway    *Gateway
+	receipts   contract.ResultPlaybackReceipts
 	state      *sessionState
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -86,7 +87,10 @@ func (c *connection) run() {
 		select {
 		case <-c.ctx.Done():
 			return
-		case frame := <-c.frames:
+		case frame, ok := <-c.frames:
+			if !ok {
+				return
+			}
 			if err := c.onFrame(frame); err != nil && !c.recoverMedia(err) {
 				return
 			}
@@ -103,10 +107,10 @@ func (c *connection) run() {
 }
 
 func (c *connection) read() {
+	defer close(c.frames)
 	for {
 		var frame contract.CarFrame
 		if err := wsjson.Read(c.ctx, c.socket, &frame); err != nil {
-			c.cancel()
 			return
 		}
 		select {
@@ -163,7 +167,7 @@ func (c *connection) onFrame(frame contract.CarFrame) error {
 	if frame.Type == contract.PlaybackAck {
 		// Acknowledgments are accepted only after all frames have been sent.
 		if c.playing == nil || c.playing.id != frame.PlaybackID {
-			c.state.settle(frame.PlaybackID, frame.PlaybackGeneration)
+			c.settlePlayback(frame.PlaybackID, frame.PlaybackGeneration)
 		}
 		return nil
 	}
@@ -398,11 +402,28 @@ func (c *connection) audio(pcm []byte) {
 func (c *connection) stopPlayback(reason string) {
 	if p := c.playing; p != nil {
 		c.playing = nil
-		if reason == "interrupted" {
-			c.state.settle(p.id, p.generation)
-		}
 		c.write(contract.CarFrame{Type: contract.PlaybackStop, PlaybackID: p.id, PlaybackGeneration: p.generation, Reason: reason})
+		if reason == "interrupted" {
+			c.settlePlayback(p.id, p.generation)
+		}
 	}
+}
+
+func (c *connection) settlePlayback(id string, generation uint64) {
+	if !c.state.canSettle(id, generation) {
+		return
+	}
+	if c.receipts != nil && strings.HasPrefix(id, "result-") {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), 2*time.Second)
+		defer cancel()
+		if err := c.receipts.SettleResultPlayback(ctx, c.scope, id, time.Now().UTC()); err != nil {
+			if c.gateway.Logger != nil {
+				c.gateway.Logger.Warn("vehicle result playback receipt unavailable", "playback_id", id, "error", err)
+			}
+			return
+		}
+	}
+	c.state.settle(id, generation)
 }
 
 func (c *connection) interrupt(userStarted bool) error {
@@ -468,6 +489,14 @@ func (c *connection) refreshResults(play bool) []contract.VehicleResultEvent {
 		id := "result-" + digest(c.scope.UserID, c.scope.SessionID, c.scope.VehicleID, result.EventID)
 		if newest[result.CommandID] != result.EventID || c.attempted[id] || c.state.wasSettled(id) || c.current != nil || c.recording != nil {
 			continue
+		}
+		if c.receipts != nil {
+			settled, err := c.receipts.ResultPlaybackSettled(ctx, c.scope, id, since)
+			if err != nil || settled {
+				// Keep delivering the result event, but wait for the durable
+				// receipt lookup before deciding whether to play audio.
+				continue
+			}
 		}
 		c.attempted[id] = true
 		c.startPlayback(id)

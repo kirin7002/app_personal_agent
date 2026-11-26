@@ -23,16 +23,17 @@ func main() {
 	chat := flag.String("chat", "", "16 kHz mono PCM16LE chat utterance")
 	chatWant := flag.String("chat-expect", "", "optional regexp for the final chat transcript")
 	output := flag.String("out", "reply.pcm", "24 kHz mono PCM16LE output")
+	readText := flag.String("read-text", "", "probe whether Qwen speaks the exact supplied text")
 	cancelAfterFirst := flag.Bool("cancel-after-first", false, "cancel after the first audio chunk")
 	flag.Parse()
-	if err := run(*car, *carWant, *chat, *chatWant, *output, *cancelAfterFirst); err != nil {
+	if err := run(*car, *carWant, *chat, *chatWant, *output, *readText, *cancelAfterFirst); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(car, carWant, chat, chatWant, output string, cancelAfterFirst bool) error {
-	if car == "" || chat == "" {
-		return errors.New("provide both -car and -chat PCM16LE samples")
+func run(car, carWant, chat, chatWant, output, readText string, cancelAfterFirst bool) error {
+	if readText == "" && (car == "" || chat == "") {
+		return errors.New("provide both -car and -chat PCM16LE samples, or -read-text")
 	}
 	factory, err := qwen.New(qwen.Config{
 		APIKey: os.Getenv("DASHSCOPE_API_KEY"), WorkspaceID: os.Getenv("DASHSCOPE_WORKSPACE_ID"),
@@ -46,6 +47,9 @@ func run(car, carWant, chat, chatWant, output string, cancelAfterFirst bool) err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	if readText != "" {
+		return probeReadAloud(ctx, factory, readText, output)
+	}
 	session, err := factory.Connect(ctx)
 	if err != nil {
 		return err
@@ -113,6 +117,25 @@ func run(car, carWant, chat, chatWant, output string, cancelAfterFirst bool) err
 	}
 	log.Printf("PCM16LE 24000 Hz mono chunks=%d bytes=%d", chunks, bytes)
 	return file.Close()
+}
+
+func probeReadAloud(ctx context.Context, factory *qwen.Factory, text, output string) error {
+	var audio []byte
+	transcript, err := factory.ProbeReadAloud(ctx, text, func(pcm []byte) error {
+		if len(audio)+len(pcm) > 24000*2*60 {
+			return errors.New("read-aloud output exceeds 60 seconds")
+		}
+		audio = append(audio, pcm...)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("read-aloud transcript=%q expected=%q PCM16LE_bytes=%d", transcript, text, len(audio))
+	if transcript != text || len(audio) == 0 {
+		return errors.New("read-aloud requires a verbatim transcript and nonempty audio")
+	}
+	return os.WriteFile(output, audio, 0600)
 }
 
 func submit(ctx context.Context, session contract.S2SSession, fileName, pattern string) (contract.FinalTranscript, error) {

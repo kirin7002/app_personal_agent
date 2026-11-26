@@ -1,6 +1,9 @@
 package contract
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type AudioFormat struct {
 	Encoding   string `json:"encoding"`
@@ -76,4 +79,11 @@ type S2SResponse interface {
 // SpeechSynthesizer emits mono 24 kHz signed 16-bit little-endian PCM.
 type SpeechSynthesizer interface {
 	Synthesize(ctx context.Context, text string, emit func([]byte) error) error
+}
+
+// ResultPlaybackReceipts persists completed or dismissed result playback across
+// gateway restarts. A ResultReader can also implement this interface.
+type ResultPlaybackReceipts interface {
+	ResultPlaybackSettled(ctx context.Context, scope Scope, playbackID string, since time.Time) (bool, error)
+	SettleResultPlayback(ctx context.Context, scope Scope, playbackID string, at time.Time) error
 }

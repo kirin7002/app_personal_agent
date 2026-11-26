@@ -81,3 +81,13 @@ CREATE TABLE IF NOT EXISTS vehicle_result_events (
 
 CREATE INDEX IF NOT EXISTS vehicle_result_events_scope_idx
     ON vehicle_result_events (scope_key, occurred_at, event_id);
+
+CREATE TABLE IF NOT EXISTS vehicle_playback_receipts (
+    scope_key TEXT NOT NULL,
+    playback_id TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    PRIMARY KEY (scope_key, playback_id)
+);
+
+CREATE INDEX IF NOT EXISTS vehicle_playback_receipts_expiration
+    ON vehicle_playback_receipts (settled_at);

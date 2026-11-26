@@ -663,6 +663,20 @@ func (m *MemoryStore) GetCommand(_ context.Context, commandID string) (*OutboxCo
 	return &cp, nil
 }
 
+func (m *MemoryStore) BeginCommandSend(_ context.Context, commandID, workerID string, attempt uint32, now time.Time) (bool, error) {
+	now = m.now(now)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	command := m.commands[commandID]
+	if command == nil || command.Status != contract.PendingDispatch || command.LeaseOwner != workerID ||
+		command.Attempts != attempt || command.LeaseUntil == nil || !command.LeaseUntil.After(now) {
+		return false, nil
+	}
+	m.markExecuting(command, now, "")
+	return true, nil
+}
+
 func (m *MemoryStore) MarkCommandExecuting(_ context.Context, commandID, workerID string, dispatchedAt time.Time, downstreamID string) error {
 	dispatchedAt = m.now(dispatchedAt)
 	m.mu.Lock()
@@ -678,6 +692,12 @@ func (m *MemoryStore) MarkCommandExecuting(_ context.Context, commandID, workerI
 	if workerID != "" && c.LeaseOwner != "" && c.LeaseOwner != workerID {
 		return &contract.BusinessError{Code: contract.TaskConflict, Message: "command lease owned by another worker"}
 	}
+	m.markExecuting(c, dispatchedAt, downstreamID)
+	return nil
+}
+
+// Caller holds m.mu.
+func (m *MemoryStore) markExecuting(c *OutboxCommand, dispatchedAt time.Time, downstreamID string) {
 	if c.DispatchedAt == nil {
 		d := dispatchedAt
 		c.DispatchedAt = &d
@@ -695,7 +715,6 @@ func (m *MemoryStore) MarkCommandExecuting(_ context.Context, commandID, workerI
 		task.Version++
 		task.UpdatedAt = dispatchedAt
 	}
-	return nil
 }
 
 func (m *MemoryStore) ReleaseCommandForRetry(_ context.Context, commandID, workerID string, retryAt time.Time, lastErr string) error {
@@ -705,13 +724,16 @@ func (m *MemoryStore) ReleaseCommandForRetry(_ context.Context, commandID, worke
 	if !ok {
 		return &contract.BusinessError{Code: contract.TaskNotEligible, Message: "command not found"}
 	}
-	if c.Status == contract.Completed || c.Status == contract.Failed {
+	if c.Status != contract.Executing && c.Status != contract.PendingDispatch {
 		return nil
 	}
-	if workerID != "" && c.LeaseOwner != "" && c.LeaseOwner != workerID {
+	if c.LeaseOwner != workerID {
 		return &contract.BusinessError{Code: contract.TaskConflict, Message: "command lease owned by another worker"}
 	}
 	t := retryAt.UTC()
+	c.Status = contract.PendingDispatch
+	c.DispatchedAt = nil
+	c.DownstreamID = ""
 	c.LeaseOwner = ""
 	c.LeaseUntil = &t
 	c.LastError = lastErr
