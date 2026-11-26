@@ -26,6 +26,8 @@ type Service struct {
 	Capabilities contract.CapabilityFinder
 	Progress     contract.ProgressReader
 	Runs         Runner
+	// Instructions supplies the deployed Hermes vehicle prompt.
+	Instructions string
 	// RetryAdmission should match the Hermes client's verified idempotency setting.
 	RetryAdmission bool
 	Now            func() time.Time
@@ -168,7 +170,7 @@ func (s *Service) register(ctx context.Context, turn contract.VehicleTurn) (Reco
 		},
 		Payload: runs.StartRequest{
 			SessionID: hermesSession, Input: turn.FinalTranscript.Text,
-			Instructions: "Treat pending_tasks and candidate_tools as current data. Continue a task only when uniquely matched; ask for a clarification otherwise. Only the vehicle result event confirms completion.\n" + string(instructions),
+			Instructions: s.Instructions + "\nTreat pending_tasks and candidate_tools as current data. Continue a task only when uniquely matched; ask for a clarification otherwise. Only the vehicle result event confirms completion.\n" + string(instructions),
 		},
 		IdempotencyKey: rand.Text(),
 	}

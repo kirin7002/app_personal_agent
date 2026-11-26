@@ -93,7 +93,8 @@ func TestManualCommitAndStreaming(t *testing.T) {
 				expect(t, ctx, c, "input_audio_buffer.commit") == nil {
 				return
 			}
-			if !send(t, ctx, c, "conversation.item.input_audio_transcription.completed", map[string]any{"item_id": item.id, "transcript": item.text}) ||
+			if !send(t, ctx, c, "conversation.item.input_audio_transcription.delta", map[string]any{"item_id": item.id, "text": "草稿"}) ||
+				!send(t, ctx, c, "conversation.item.input_audio_transcription.completed", map[string]any{"item_id": item.id, "transcript": item.text}) ||
 				!send(t, ctx, c, "input_audio_buffer.committed", map[string]any{"item_id": item.id}) {
 				return
 			}
@@ -118,12 +119,12 @@ func TestManualCommitAndStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	for _, want := range []string{"car", "chat"} {
+	for _, want := range []struct{ id, final string }{{"car", "把车窗关一下"}, {"chat", "你好"}} {
 		if err := session.AppendAudio(ctx, []byte{1, 2}); err != nil {
 			t.Fatal(err)
 		}
 		got, err := session.Commit(ctx)
-		if err != nil || got.InputItemID != want || got.ProviderSessionID != "mock-session" {
+		if err != nil || got.InputItemID != want.id || got.ProviderSessionID != "mock-session" || got.Text != want.final {
 			t.Fatalf("commit = %+v, %v", got, err)
 		}
 	}
@@ -201,6 +202,21 @@ func TestTranscriptionFailureAndNewSession(t *testing.T) {
 		var diagnostic *ProtocolError
 		if !errors.As(err, &diagnostic) || diagnostic.Stage != "transcription" || diagnostic.EventID != "err1" || errors.Is(err, io.EOF) {
 			t.Fatalf("unexpected diagnostic: %+v", err)
+		}
+	}
+}
+
+func TestBailianEndpoint(t *testing.T) {
+	for _, test := range []struct {
+		workspace, region, endpoint string
+	}{
+		{"llm-example", "cn-beijing", "wss://llm-example.cn-beijing.maas.aliyuncs.com"},
+		{"", "cn-beijing", "wss://dashscope.aliyuncs.com"},
+		{"", "ap-southeast-1", "wss://dashscope-intl.aliyuncs.com"},
+	} {
+		factory, err := New(Config{APIKey: "fixture", WorkspaceID: test.workspace, Region: test.region})
+		if err != nil || factory.url != test.endpoint+"/api-ws/v1/realtime?model="+Model {
+			t.Fatalf("failed to resolve region %q and workspace %q: %v", test.region, test.workspace, err)
 		}
 	}
 }
