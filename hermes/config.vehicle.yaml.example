@@ -1,0 +1,86 @@
+# Hermes runtime configuration sample for Vehicle Control (H01)
+# Pinned Hermes version: vgit.72c8803 (commit 72c88037, 2026.9.24)
+# Pinned MCP SDK: mcp==2.3.0 (Streamable HTTP, MCP-Protocol-Version 2025-11-25)
+#
+# Launch via:
+#   HERMES_HOME=/path/to/vehicle-hermes-home \
+#   HERMES_AGENT_DIR=/path/to/hermes-agent \
+#   VEHICLE_MCP_SERVICE_TOKEN=<service-bearer-token> \
+#   DASHSCOPE_API_KEY=<bailian-api-key> \
+#   API_SERVER_KEY=<hermes-api-key> \
+#   API_SERVER_ENABLED=true \
+#   python -m hermes.gateway_launcher
+
+model:
+  default: deepseek-v4.1-flash-1017
+  provider: custom:vehicle-bailian
+  context_length: 65536
+
+providers:
+  vehicle-bailian:
+    api: https://dashscope.aliyuncs.com/apps/anthropic
+    key_env: DASHSCOPE_API_KEY
+    transport: anthropic_messages
+    default_model: deepseek-v4.1-flash-1017
+    context_length: 65536
+    discover_models: false
+
+auth:
+  adopt_external_logins: false
+
+updates:
+  check: false
+
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+
+agent:
+  max_turns: 8
+
+tools:
+  tool_search:
+    enabled: "off"
+
+# Expose ONLY the vehicle MCP toolset to Runs API sessions.
+toolsets:
+  - mcp-vehicle
+
+platform_toolsets:
+  api_server:
+    - mcp-vehicle
+
+mcp_servers:
+  vehicle:
+    # Streamable HTTP endpoint served by Go MCP (H04).
+    url: http://127.0.0.1:18080/mcp
+    # Static service-to-service Bearer auth; per-turn X-Vehicle-Turn-Handle and
+    # X-Vehicle-Hermes-Session-ID headers + params._meta are injected per call by
+    # hermes/turn_binding_adapter.py without exposing them to the model.
+    headers:
+      Authorization: "Bearer ${VEHICLE_MCP_SERVICE_TOKEN}"
+    strict_redirect_headers: true
+    timeout: 10
+    connect_timeout: 10
+    # IMPORTANT (write-tool approval):
+    # Hermes vgit.72c8803 pauses write tools (tools without readOnlyHint=true)
+    # when trust=untrusted and emits approval.request, blocking voice turns.
+    # Vehicle MCP uses trust=full because Go MCP enforces trusted turn context,
+    # intent guards, candidate version matching, schema validation, and idempotency.
+    trust: full
+    sampling:
+      enabled: false
+    include_tools:
+      - create_vehicle_task
+      - list_vehicle_tasks
+      - dispatch_vehicle_command
+      - get_vehicle_status
+      - search_vehicle_manual
+      - search_vehicle_capabilities
+
+gateway:
+  api_server:
+    enabled: true
+    host: 127.0.0.1
+    port: 8642
+    max_concurrent_runs: 8
