@@ -45,8 +45,12 @@ type Config struct {
 	// and vehicle.hermes_session_id matching the HTTP headers. When false, headers
 	// are still mandatory and any _meta keys present must still strictly match headers.
 	RequireMeta bool
-	// Turns resolves read turns (and locks write turns in memory mode).
+	// Turns resolves read turns (and locks write turns in memory/SQLite/MySQL mode).
 	Turns contract.TurnRegistry
+	// LockTurn optionally overrides the transaction-scoped turn lock used during
+	// SQL writes. When nil, Server automatically uses Turns' own LockWritableTurn
+	// method (e.g., *turns.SQLiteStore) and falls back to turns.LockWritableTurn (MySQL).
+	LockTurn func(ctx context.Context, tx *sql.Tx, meta contract.TurnMetadata, now time.Time) (contract.TurnContext, error)
 	// Tasks stores vehicle tasks, turn write idempotency, and command outbox (H03).
 	Tasks tasks.Store
 	// Catalog provides schemas, BM25 search, telemetry status, and manual retrieval (H06).
@@ -323,6 +327,18 @@ func (s *Server) callWriteTool(
 		}
 	}
 
+	type txTurnLocker interface {
+		LockWritableTurn(context.Context, *sql.Tx, contract.TurnMetadata, time.Time) (contract.TurnContext, error)
+	}
+	lockTx := s.cfg.LockTurn
+	if lockTx == nil {
+		if locker, ok := s.cfg.Turns.(txTurnLocker); ok {
+			lockTx = locker.LockWritableTurn
+		} else {
+			lockTx = turns.LockWritableTurn
+		}
+	}
+
 	req := tasks.TaskWriteRequest{
 		Turn:            turn,
 		Metadata:        meta,
@@ -330,7 +346,7 @@ func (s *Server) callWriteTool(
 		ExpectedVersion: expectedVersion,
 		Now:             now,
 		TxLock: func(txCtx context.Context, tx *sql.Tx, lockNow time.Time) (contract.TurnContext, error) {
-			return turns.LockWritableTurn(txCtx, tx, meta, lockNow)
+			return lockTx(txCtx, tx, meta, lockNow)
 		},
 		MemLock: func(lockCtx context.Context, lockNow time.Time) (contract.TurnContext, error) {
 			return s.cfg.Turns.ResolveTurn(lockCtx, meta, lockNow)

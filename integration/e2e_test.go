@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -39,9 +40,23 @@ func testScenarioA(t *testing.T, live bool) {
 	var taskStore tasks.Store = tasks.NewMemoryStore(validator)
 	mcpToken := rand.Text()
 	if live {
-		db := integrationDB(t, ctx)
-		turnStore = &turns.MySQLStore{DB: db}
-		taskStore = &tasks.MySQLStore{DB: db, Validator: validator}
+		if os.Getenv("H07_MYSQL_DSN") != "" {
+			db := integrationDB(t, ctx)
+			turnStore = &turns.MySQLStore{DB: db}
+			taskStore = &tasks.MySQLStore{DB: db, Validator: validator}
+		} else {
+			sqlitePath := os.Getenv("H07_SQLITE_PATH")
+			if sqlitePath == "" {
+				sqlitePath = filepath.Join(t.TempDir(), "h07-live.sqlite")
+			}
+			db, err := tasks.OpenSQLite(sqlitePath)
+			if err != nil {
+				t.Fatalf("open SQLite fallback db: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			turnStore = turns.NewSQLiteStore(db)
+			taskStore = tasks.NewSQLiteStore(db, validator)
+		}
 	}
 
 	service := mcp.NewServer(mcp.Config{ServiceToken: mcpToken, RequireMeta: true, Turns: turnStore, Tasks: taskStore, Catalog: cat})
