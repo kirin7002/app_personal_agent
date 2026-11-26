@@ -1,0 +1,22 @@
+[
+  {
+    "code": "TURN_CONTEXT_INVALID",
+    "message": "轮次已失效或与会话不匹配",
+    "retryable": false
+  },
+  {
+    "code": "CLARIFICATION_REQUIRED",
+    "message": "请确认要打开还是关闭左后窗",
+    "retryable": false
+  },
+  {
+    "code": "TASK_EXPIRED",
+    "message": "待回复任务已到期",
+    "retryable": false
+  },
+  {
+    "code": "IDEMPOTENCY_CONFLICT",
+    "message": "同一轮次已提交另一项操作",
+    "retryable": false
+  }
+]

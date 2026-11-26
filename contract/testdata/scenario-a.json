@@ -1,0 +1,118 @@
+{
+  "steps": [
+    {
+      "turn": {
+        "scope": {
+          "user_id": "U1",
+          "session_id": "S1",
+          "vehicle_id": "VCL1"
+        },
+        "voice_turn_id": "V1",
+        "request_id": "R1",
+        "final_transcript": {
+          "provider_session_id": "Q1",
+          "input_item_id": "I1",
+          "text": "把车窗关一下"
+        }
+      },
+      "pending_tasks": [],
+      "mcp_call": {
+        "name": "create_vehicle_task",
+        "arguments": {
+          "device": "window",
+          "tool": "close",
+          "params": {}
+        }
+      },
+      "mcp_result": {
+        "task_id": "T101",
+        "status": "pending_reply",
+        "missing_fields": [
+          "position"
+        ],
+        "question": "要关哪扇车窗？",
+        "expires_at": "2026-11-26T10:10:00Z"
+      }
+    },
+    {
+      "turn": {
+        "scope": {
+          "user_id": "U1",
+          "session_id": "S1",
+          "vehicle_id": "VCL1"
+        },
+        "voice_turn_id": "V2",
+        "request_id": "R2",
+        "final_transcript": {
+          "provider_session_id": "Q1",
+          "input_item_id": "I2",
+          "text": "左后窗"
+        }
+      },
+      "pending_tasks": [
+        {
+          "task_id": "T101",
+          "device": "window",
+          "tool": "close",
+          "version": 1,
+          "known_params": {},
+          "missing_fields": [
+            "position"
+          ],
+          "question": "要关哪扇车窗？",
+          "created_at": "2026-11-26T10:00:00Z",
+          "expires_at": "2026-11-26T10:10:00Z",
+          "params_schema": {
+            "type": "object",
+            "properties": {
+              "position": {
+                "type": "string",
+                "enum": [
+                  "front_left",
+                  "front_right",
+                  "rear_left",
+                  "rear_right"
+                ]
+              }
+            },
+            "required": [
+              "position"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "mcp_call": {
+        "name": "dispatch_vehicle_command",
+        "arguments": {
+          "task_id": "T101",
+          "device": "window",
+          "tool": "close",
+          "params": {
+            "position": "rear_left"
+          }
+        }
+      },
+      "mcp_result": {
+        "task_id": "T101",
+        "command_id": "C88",
+        "status": "pending_dispatch"
+      }
+    }
+  ],
+  "vehicle_result": {
+    "scope": {
+      "user_id": "U1",
+      "session_id": "S1",
+      "vehicle_id": "VCL1"
+    },
+    "device": "window",
+    "tool": "close",
+    "event_id": "C88:completed",
+    "request_id": "R2",
+    "task_id": "T101",
+    "command_id": "C88",
+    "status": "completed",
+    "occurred_at": "2026-11-26T10:00:09Z"
+  }
+}
