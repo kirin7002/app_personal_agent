@@ -21,7 +21,8 @@ git diff --check
 | `DASHSCOPE_REGION` / `DASHSCOPE_WORKSPACE_ID` | 百炼地域及业务空间，用于专属域名。省略 Workspace ID 时，北京和新加坡使用对应的区域域名 |
 | `H07_HERMES_PYTHON` | H01 锁定 Hermes 部署的 Python 可执行文件，包含固定 MCP SDK |
 | `H07_HERMES_AGENT_DIR` | Hermes Agent 源码目录，Git 提交前缀为 `72c88037` |
-| `H07_MYSQL_DSN` | 独立测试数据库，具备建表和读写权限 |
+| `H07_MYSQL_DSN` | 可选，独立 MySQL 测试数据库（具备建表和读写权限）；留空时 `TestLiveScenarioA` 自动使用 SQLite（`H07_SQLITE_PATH` 或临时文件） |
+| `H07_SQLITE_PATH` | 可选，指定 SQLite 数据库文件路径替代 MySQL（默认使用测试临时目录） |
 | `H07_PCM_DIR` | 两个输入样本 `close-window.pcm` 和 `rear-left.pcm` 的目录 |
 | `H07_ARTIFACT_DIR` | 可选，用于保存追问和确认播报的 24 kHz WAV |
 

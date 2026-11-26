@@ -1,6 +1,18 @@
-# H03 MySQL 任务、过期扫描与命令 Outbox
+# H03 任务存储（MySQL / SQLite）、过期扫描与命令 Outbox
 
-`vehicle/tasks` 实现车控任务持久化、10 分钟待回复到期控制、单轮单写幂等、命令 Outbox 与单调状态结果事件 Outbox，提供 `MySQLStore`（InnoDB + `FOR UPDATE` / `FOR UPDATE SKIP LOCKED`）与单进程模拟 `MemoryStore`。
+`vehicle/tasks` 实现车控任务持久化、10 分钟待回复到期控制、单轮单写幂等、命令 Outbox 与单调状态结果事件 Outbox，提供：
+- `MySQLStore`（InnoDB + `FOR UPDATE` / `FOR UPDATE SKIP LOCKED`，迁移见 [tasks.sql](../vehicle/tasks/tasks.sql)）
+- `SQLiteStore`（纯 Go `modernc.org/sqlite`，WAL + `busy_timeout=5000` + `BEGIN IMMEDIATE`，迁移见 [sqlite.sql](../vehicle/tasks/sqlite.sql)，可通过 `tasks.OpenSQLite(path)` 一键初始化 `voice_turns` 与 `vehicle_tasks` 等全套表）
+- `MemoryStore`（单进程模拟）
+
+## SQLite 快速接线
+
+```go
+db, err := tasks.OpenSQLite("/path/to/vehicle.sqlite") // 自动开启 WAL + BEGIN IMMEDIATE 并建表
+turnStore := turns.NewSQLiteStore(db)
+taskStore := tasks.NewSQLiteStore(db, tasks.NewCatalogValidator(cat))
+// mcp.NewServer 传入 Turns: turnStore, Tasks: taskStore 即可自动走 LockWritableTurnSQLite，与 Cancel 串行化
+```
 
 ## 数据库表（[tasks.sql](../vehicle/tasks/tasks.sql)）
 
