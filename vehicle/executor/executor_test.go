@@ -125,7 +125,8 @@ func TestCrashBeforeSendAndCrashAfterSendRecovery(t *testing.T) {
 		t.Fatalf("expected completed, got %s", t1.Status)
 	}
 
-	// --- Scenario 2: Crash AFTER send ---
+	// --- Scenario 2: Crash after transport, before its response is persisted. ---
+	sim.Caps.SupportsIdempotency = false
 	res2 := seedCommand(t, store, scope, "R_AFTER", contract.Operation{Device: "window", Tool: "close"}, map[string]any{"position": "rear_left"}, now)
 	w1.CrashAfterSendOnce = true
 	if processed, err := w1.ProcessNext(ctx); err != nil || !processed {
@@ -133,6 +134,11 @@ func TestCrashBeforeSendAndCrashAfterSendRecovery(t *testing.T) {
 	}
 	if sim.SendCount(res2.CommandID) != 1 {
 		t.Fatalf("expected 1 send before crash, got %d", sim.SendCount(res2.CommandID))
+	}
+
+	inFlight, err := store.GetCommand(ctx, res2.CommandID)
+	if err != nil || inFlight.Status != contract.Executing || inFlight.DispatchedAt == nil || inFlight.DownstreamID != "" {
+		t.Fatalf("send intent must survive without the downstream response: %+v, %v", inFlight, err)
 	}
 
 	// Lease expires -> W2 recovers executing command via reconciliation WITHOUT resending!
@@ -496,5 +502,39 @@ func TestEndToEndTextEntrySingleFollowUpDualMatchTenMinExpiryAndDuplicateReceipt
 	expiredCount, err := taskStore.ExpirePending(ctx, now)
 	if err != nil || expiredCount != 1 {
 		t.Fatalf("expected expiry scanner to expire 1 HVAC task, got %d, %v", expiredCount, err)
+	}
+}
+
+func TestRetryableSendRetainsStableCommand(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	cat := catalog.NewService(nil)
+	store := tasks.NewMemoryStore(tasks.NewCatalogValidator(cat))
+	channel := NewSimulatedChannel(nil)
+	channel.Mode = SimRetryableOnce
+	channel.Now = func() time.Time { return now }
+	worker := NewWorker("retry-worker", store, cat, channel)
+	worker.Now = func() time.Time { return now }
+	scope := contract.Scope{UserID: "retry-user", SessionID: "retry-session", VehicleID: "sim-car"}
+	first := seedCommand(t, store, scope, "retry-request", contract.Operation{Device: "window", Tool: "close"}, map[string]any{"position": "rear_left"}, now)
+	if processed, err := worker.ProcessNext(ctx); !processed || err != nil {
+		t.Fatalf("first attempt: processed=%v err=%v", processed, err)
+	}
+	cmd, err := store.GetCommand(ctx, first.CommandID)
+	if err != nil || cmd.Status != contract.PendingDispatch || cmd.DispatchedAt != nil {
+		t.Fatalf("retry was not requeued: %+v err=%v", cmd, err)
+	}
+	task, err := store.GetTask(ctx, scope, first.TaskID)
+	if err != nil || task.Status != contract.Executing {
+		t.Fatalf("in-progress task regressed after retryable send: %+v err=%v", task, err)
+	}
+	now = now.Add(worker.RetryBackoff)
+	if processed, err := worker.ProcessNext(ctx); !processed || err != nil {
+		t.Fatalf("second attempt: processed=%v err=%v", processed, err)
+	}
+	events, err := store.ListVehicleResults(ctx, scope, now.Add(-time.Minute))
+	if err != nil || len(events) != 1 || events[0].CommandID != first.CommandID || events[0].Status != contract.Completed ||
+		channel.SendCount(first.CommandID) != 2 {
+		t.Fatalf("retry must reuse its ID and publish one completion: %+v, %v", events, err)
 	}
 }

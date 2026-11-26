@@ -757,6 +757,37 @@ func (s *MySQLStore) GetCommand(ctx context.Context, commandID string) (*OutboxC
 	return &cmd, nil
 }
 
+func (s *MySQLStore) BeginCommandSend(ctx context.Context, commandID, workerID string, attempt uint32, now time.Time) (bool, error) {
+	at := s.now(now)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE vehicle_command_outbox
+		SET status = ?, dispatched_at = ?, updated_at = ?
+		WHERE command_id = ? AND status = ? AND lease_owner = ? AND attempts = ? AND lease_until > ?`,
+		string(contract.Executing), at, at, commandID, string(contract.PendingDispatch), workerID, attempt, at)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vehicle_tasks SET status = ?, version = version + 1, updated_at = ?
+		WHERE command_id = ? AND status = ?`,
+		string(contract.Executing), at, commandID, string(contract.PendingDispatch)); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *MySQLStore) MarkCommandExecuting(ctx context.Context, commandID, workerID string, dispatchedAt time.Time, downstreamID string) error {
 	dispatchedAt = s.now(dispatchedAt)
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -815,9 +846,9 @@ func (s *MySQLStore) ReleaseCommandForRetry(ctx context.Context, commandID, work
 	now := s.now(time.Time{})
 	_, err := s.DB.ExecContext(ctx, `
 		UPDATE vehicle_command_outbox
-		SET lease_owner = '', lease_until = ?, last_error = ?, updated_at = ?
-		WHERE command_id = ? AND (lease_owner = '' OR lease_owner = ?) AND status NOT IN (?, ?)`,
-		retryAt.UTC(), lastErr, now, commandID, workerID, string(contract.Completed), string(contract.Failed),
+		SET status = ?, dispatched_at = NULL, downstream_id = '', lease_owner = '', lease_until = ?, last_error = ?, updated_at = ?
+		WHERE command_id = ? AND lease_owner = ? AND status IN (?, ?)`,
+		string(contract.PendingDispatch), retryAt.UTC(), lastErr, now, commandID, workerID, string(contract.Executing), string(contract.PendingDispatch),
 	)
 	return err
 }

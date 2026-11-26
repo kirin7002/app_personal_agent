@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kirin7002/app_personal_agent/contract"
 	"github.com/kirin7002/app_personal_agent/vehicle/turns"
@@ -40,7 +41,9 @@ func runScenarioA(t *testing.T, ctx context.Context, svc *turns.Service, results
 	service := &gateway.Gateway{Auth: auth, Media: media, Turns: svc, Pending: svc, Results: results, TTS: tts}
 	server := httptest.NewServer(service)
 	t.Cleanup(server.Close)
+	start := time.Now()
 	car := connectCar(t, ctx, server.URL, auth.token, scope)
+	t.Logf("latency workflow=vehicle connection=cold session_ready_ms=%d", time.Since(start).Milliseconds())
 
 	firstPCM, secondPCM := []byte{1, 0}, []byte{2, 0}
 	if live {
@@ -48,7 +51,9 @@ func runScenarioA(t *testing.T, ctx context.Context, svc *turns.Service, results
 		secondPCM = sample(t, "rear-left.pcm")
 	}
 	car.say("request-close", firstPCM, live)
+	endOfInput := time.Now()
 	first := car.hear()
+	t.Logf("latency workflow=vehicle connection=cold end_to_first_audio_ms=%d", first.firstAudioAt.Sub(endOfInput).Milliseconds())
 	if first.reply == nil || first.reply.Status != contract.PendingReply || first.reply.RunID == "" ||
 		first.reply.TaskID == "" || first.reply.CommandID != "" || !strings.Contains(first.reply.Text, "窗") || first.result != nil {
 		t.Fatalf("first turn did not produce a persisted pending task and spoken clarification: %+v", first.reply)
@@ -63,7 +68,9 @@ func runScenarioA(t *testing.T, ctx context.Context, svc *turns.Service, results
 		first.reply.TaskID, first.playbackID, len(first.pcm))
 
 	car.say("answer-rear-left", secondPCM, live)
+	endOfInput = time.Now()
 	progress := car.hear()
+	t.Logf("latency workflow=vehicle connection=warm end_to_first_audio_ms=%d", progress.firstAudioAt.Sub(endOfInput).Milliseconds())
 	if progress.reply == nil || progress.reply.TaskID != first.reply.TaskID || progress.reply.CommandID == "" ||
 		progress.reply.RunID == first.reply.RunID || progress.reply.RequestID == first.reply.RequestID ||
 		progress.reply.VoiceTurnID == first.reply.VoiceTurnID {
@@ -88,6 +95,9 @@ func runScenarioA(t *testing.T, ctx context.Context, svc *turns.Service, results
 	t.Logf("confirmation transcript=%q voice_turn_id=%s request_id=%s run_id=%s task_id=%s command_id=%s event_id=%s playback_id=%s audio_bytes=%d",
 		stored.Context.FinalTranscript.Text, progress.reply.VoiceTurnID, progress.reply.RequestID, progress.reply.RunID,
 		result.TaskID, result.CommandID, result.EventID, confirmation.playbackID, len(confirmation.pcm))
+	if receipts, ok := results.(contract.ResultPlaybackReceipts); ok {
+		expectPlaybackReceipt(t, ctx, receipts, scope, confirmation.playbackID)
+	}
 	if live {
 		output := os.Getenv("H07_ARTIFACT_DIR")
 		saveWAV(t, output, "clarification.wav", first.pcm)
@@ -110,4 +120,26 @@ func sample(t *testing.T, name string) []byte {
 		t.Fatalf("%s must contain up to 30 seconds of PCM16LE audio", name)
 	}
 	return input
+}
+
+func expectPlaybackReceipt(t *testing.T, ctx context.Context, receipts contract.ResultPlaybackReceipts, scope contract.Scope, id string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		saved, err := receipts.ResultPlaybackSettled(ctx, scope, id, time.Now().Add(-contract.ResultRetention))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("vehicle result audio acknowledgment was not persisted")
+		case <-tick.C:
+		}
+	}
 }

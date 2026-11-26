@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/kirin7002/app_personal_agent/contract"
+	"github.com/kirin7002/app_personal_agent/vehicle/tasks"
 )
 
 type fakeBackend struct {
@@ -261,5 +263,78 @@ func TestEarlyVehicleConfirmationSupersedesProgress(t *testing.T) {
 	audio := until(t, ctx, socket, contract.AudioOutput)
 	if !strings.HasPrefix(audio.PlaybackID, "result-") {
 		t.Fatalf("expected the result playback, got %+v", audio)
+	}
+}
+
+type durableResults struct {
+	*fakeBackend
+	contract.ResultPlaybackReceipts
+}
+
+func TestCompletedPlaybackSurvivesGatewayRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	scope := contract.Scope{UserID: "user", SessionID: "session", VehicleID: "car-1"}
+	backend := &fakeBackend{results: []contract.VehicleResultEvent{{
+		Scope: scope, Operation: contract.Operation{Device: "window", Tool: "close"},
+		EventID: "C88:completed", RequestID: "R2", TaskID: "T101", CommandID: "C88",
+		Status: contract.Completed, OccurredAt: time.Now(),
+	}}}
+	file := filepath.Join(t.TempDir(), "playback.sqlite")
+	open := func() (*httptest.Server, *tasks.SQLiteStore, func()) {
+		t.Helper()
+		db, err := tasks.OpenSQLite(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := tasks.NewSQLiteStore(db, nil)
+		server := httptest.NewServer(&Gateway{
+			Auth: backend, Media: &fakeFactory{}, Turns: backend, Pending: backend, TTS: backend,
+			Results: durableResults{fakeBackend: backend, ResultPlaybackReceipts: store},
+		})
+		return server, store, func() {
+			server.Close()
+			db.Close()
+		}
+	}
+
+	first, store, closeFirst := open()
+	defer closeFirst()
+	car, _ := dial(t, ctx, first)
+	completed := until(t, ctx, car, contract.PlaybackStop)
+	write(t, ctx, car, contract.CarFrame{
+		Type: contract.PlaybackAck, PlaybackID: completed.PlaybackID, PlaybackGeneration: completed.PlaybackGeneration,
+	})
+	if err := car.Close(websocket.StatusNormalClosure, "reconnect"); err != nil {
+		t.Fatal(err)
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		saved, err := store.ResultPlaybackSettled(ctx, scope, completed.PlaybackID, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("playback acknowledgment was lost on disconnect")
+		case <-ticker.C:
+		}
+	}
+	closeFirst()
+
+	second, _, closeSecond := open()
+	defer closeSecond()
+	car, generation := dial(t, ctx, second)
+	if result := until(t, ctx, car, contract.VehicleResult); result.Result.EventID != "C88:completed" {
+		t.Fatalf("vehicle result was lost after restart: %+v", result)
+	}
+	utterance(t, ctx, car, generation, "new-turn", 1)
+	next := until(t, ctx, car, contract.PlaybackStart)
+	if next.PlaybackID == completed.PlaybackID || !strings.HasPrefix(next.PlaybackID, "reply-") {
+		t.Fatalf("acknowledged result replayed after restart: %+v", next)
 	}
 }

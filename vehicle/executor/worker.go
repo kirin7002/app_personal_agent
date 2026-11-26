@@ -138,20 +138,25 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
+	// Persist the send intent under the current lease. Recovery must reconcile
+	// an interrupted send because the transport may already have received it.
+	now = w.now()
+	started, err := w.Store.BeginCommandSend(ctx, cmd.CommandID, w.WorkerID, cmd.Attempts, now)
+	if err != nil || !started {
+		return true, err
+	}
+
 	resp, sendErr := w.Channel.SendCommand(ctx, cmd.VehicleCommand)
+	if w.CrashAfterSendOnce {
+		w.CrashAfterSendOnce = false
+		return true, nil
+	}
 	if resp.DownstreamID != "" {
 		w.recordDownstreamID(cmd.CommandID, resp.DownstreamID)
 	}
 	if sendErr != nil {
 		resp.Kind = OutcomeUncertain
 		resp.Reason = sendErr.Error()
-	}
-
-	if w.CrashAfterSendOnce {
-		w.CrashAfterSendOnce = false
-		// Simulate persisting executing intent before crash (or downstream executed before crash).
-		_ = w.Store.MarkCommandExecuting(ctx, cmd.CommandID, w.WorkerID, now, resp.DownstreamID)
-		return true, nil
 	}
 
 	caps := w.Channel.Capabilities()

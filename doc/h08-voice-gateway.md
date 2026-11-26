@@ -2,7 +2,7 @@
 
 将 `gateway.Gateway` 挂到 `GET /voice/audio`，注入会话认证、S2S、H02 轮次服务及候选读取、H05 结果读取、可信文本 TTS。网关按 [H00](vehicle-contract.md) 协商 PCM16LE（输入 16 kHz，输出 24 kHz）和控制帧。明确日常短句直接使用 S2S，车辆相关、短补参和无法确定的候选交给 H02。
 
-车端起讲时立即停止本地播放，网关停止旧播放并取消在途工作。若取消发生在 Qwen 提交或生成的关联 ID 尚未确认时，网关更换连接代数并提示重新采集。已登记的业务命令由 Go 继续跟踪。重连时，网关从结果读取接口获取保留期内的对应业务事件。播放 ID 跨重连稳定，车端应持久化已经消费的 ID。网关进程内保存回执和插话后的播放状态，进程重启后使用稳定 ID 与车端已消费记录去重。
+车端起讲时立即停止本地播放，网关停止旧播放并取消在途工作。若取消发生在 Qwen 提交或生成的关联 ID 尚未确认时，网关更换连接代数并提示重新采集。已登记的业务命令由 Go 继续跟踪。重连时，网关从结果读取接口获取保留期内的对应业务事件。播放 ID 跨重连稳定，车端应持久化已经消费的 ID。MySQL 和 SQLite 结果存储同时实现 `contract.ResultPlaybackReceipts`。网关把已收到的播放回执或用户打断的结果播报写入 `vehicle_playback_receipts`，重启后仍提供业务结果并跳过已确认的音频。进程内存储用于模拟。车端应持久化已消费的播放 ID，以便在播放完成但回执丢失的情况下去重。
 
 通过注入的 slog Logger 记录供应商就绪、首个输入分片、录音结束、最终转写、分流、Hermes 返回和首帧下行的耗时。需对真实音频的冷、热连接及闲聊、车控分别采样后再统计 P50/P95。
 
@@ -24,4 +24,4 @@ git diff --check
 go run ./cmd/car-sim -url ws://127.0.0.1:8080/voice/audio -wait-result -out /tmp/car-replies /tmp/app-personal-agent-car-samples/close-window.pcm /tmp/app-personal-agent-car-samples/rear-left.pcm
 ```
 
-车端模拟器按间隔发送分片、保存下行音频并发送播放回执。H07 验证交接到实际 Hermes 和车辆任务模块的链路。
+车端模拟器按间隔发送分片，保存下行音频后发送播放回执。同一输出目录内，车辆结果音频按稳定的 `playback_id` 命名，重连收到相同 ID 时复用已保存的文件。H07 验证交接到实际 Hermes 和车辆任务模块的链路。

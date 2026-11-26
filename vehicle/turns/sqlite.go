@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/kirin7002/app_personal_agent/contract"
@@ -60,45 +59,70 @@ func buildSQLiteDSN(path string) string {
 // SQLiteStore persists voice turns in SQLite as a zero-dependency drop-in
 // alternative to MySQLStore.
 type SQLiteStore struct {
-	DB    *sql.DB
-	mu    sync.Mutex
-	locks map[contract.Scope]*scopeLock
+	DB *sql.DB
 }
 
 func NewSQLiteStore(db *sql.DB) *SQLiteStore {
-	return &SQLiteStore{
-		DB:    db,
-		locks: make(map[contract.Scope]*scopeLock),
-	}
+	return &SQLiteStore{DB: db}
 }
 
-func (s *SQLiteStore) LockScope(ctx context.Context, scope contract.Scope) (func(), error) {
-	s.mu.Lock()
-	if s.locks == nil {
-		s.locks = make(map[contract.Scope]*scopeLock)
-	}
-	lock := s.locks[scope]
-	if lock == nil {
-		lock = &scopeLock{token: make(chan struct{}, 1)}
-		s.locks[scope] = lock
-	}
-	lock.waiters++
-	s.mu.Unlock()
+// A ticket lives longer than the bounded turn, including time spent waiting
+// for admission. Stale tickets become eligible for removal after a process exits.
+const sqliteScopeTicketLifetime = 2 * time.Minute
 
-	release := func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		lock.waiters--
-		if lock.waiters == 0 {
-			delete(s.locks, scope)
-		}
+func (s *SQLiteStore) LockScope(ctx context.Context, scope contract.Scope) (func(), error) {
+	now := time.Now()
+	deadline := now.Add(sqliteScopeTicketLifetime)
+	db := s.DB
+	if _, err := db.ExecContext(ctx, "DELETE FROM voice_scope_queue WHERE expires_at <= ?", now.UnixMilli()); err != nil {
+		return nil, err
 	}
-	select {
-	case lock.token <- struct{}{}:
-		return func() { <-lock.token; release() }, nil
-	case <-ctx.Done():
-		release()
-		return nil, ctx.Err()
+	key := scopeKey(scope)
+	result, err := db.ExecContext(ctx, "INSERT INTO voice_scope_queue (scope_key, expires_at) VALUES (?, ?)", key, deadline.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	ticket, err := result.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	release := func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = db.ExecContext(cleanup, "DELETE FROM voice_scope_queue WHERE ticket_id = ?", ticket)
+	}
+	acquired := false
+	defer func() {
+		if !acquired {
+			release()
+		}
+	}()
+
+	wait, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		now := time.Now()
+		var first int64
+		err := db.QueryRowContext(wait, `SELECT ticket_id FROM voice_scope_queue
+			WHERE scope_key = ? AND expires_at > ? ORDER BY ticket_id LIMIT 1`,
+			key, now.UnixMilli()).Scan(&first)
+		if err != nil {
+			return nil, err
+		}
+		if err := wait.Err(); err != nil {
+			return nil, err
+		}
+		if first == ticket {
+			acquired = true
+			return release, nil
+		}
+		select {
+		case <-wait.Done():
+			return nil, wait.Err()
+		case <-ticker.C:
+		}
 	}
 }
 

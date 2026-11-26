@@ -14,6 +14,12 @@
 | 对账窗口 | `ReconcileWindow=5m`（窗口内迟到终态可推进，超窗记录 `LateEvidence`） | 与既有车控异常处理流程对接 |
 | 车况确认 | 复用 H06 `ConfirmCommandEffect`（目标车、目标值、下发后采样、`fresh`；空调同时校验 `power=on` 与目标设温） | 需保证车端信号采样时钟单调且可判定新鲜度 |
 
+## 发送与恢复
+
+worker 验证当前租约和尝试编号后，先在数据库中登记 `executing` 和发送时间，再调用车辆通道。发送后在保存回执前中断时，接手的 worker 根据 `command_id` 查询或等回执。可证实失败且通道支持幂等时，重试保留原 `command_id`。只有明确执行回执或满足时序的目标车况才产生 `completed` 事件。
+
+升级时先停止旧 worker，并核对旧版已领取、尚处于 `pending_dispatch` 的指令。旧版在发送后才写入执行状态，这些记录需要用原 `command_id` 对账后再恢复处理。
+
 ## 通知与静态反馈
 
 - 终态（`completed`、`failed`、`result_unknown`）更新与 `vehicle_result_events` 写入在 H03 同一事务内原子提交，按 `event_id = command_id + ":" + status` 去重，保留至少 24 小时，供 H08 通过 `contract.ResultReader` 消费与断线重取。

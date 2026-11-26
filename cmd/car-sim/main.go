@@ -4,12 +4,15 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -150,11 +153,15 @@ func record(ctx context.Context, socket *websocket.Conn, output string, turn int
 				return fmt.Errorf("playback failed: %s", frame.Reason)
 			}
 			part++
-			path := filepath.Join(output, fmt.Sprintf("turn-%d-playback-%d.pcm", turn, part))
-			if err := os.WriteFile(path, pcm, 0600); err != nil {
+			path, replayed, err := savePlayback(output, id, turn, part, pcm)
+			if err != nil {
 				return err
 			}
-			log.Printf("playback=%s chunks=%d bytes=%d path=%s", id, sequence, len(pcm), path)
+			if replayed {
+				log.Printf("playback=%s already saved path=%s", id, path)
+			} else {
+				log.Printf("playback=%s chunks=%d bytes=%d path=%s", id, sequence, len(pcm), path)
+			}
 			if err := wsjson.Write(ctx, socket, contract.CarFrame{Type: contract.PlaybackAck,
 				PlaybackID: id, PlaybackGeneration: generation}); err != nil {
 				return err
@@ -164,4 +171,39 @@ func record(ctx context.Context, socket *websocket.Conn, output string, turn int
 			}
 		}
 	}
+}
+
+// Result audio uses its stable ID as both the output filename and the local
+// consumption record, including when the network drops before the ACK.
+func savePlayback(output, id string, turn, part int, pcm []byte) (path string, replayed bool, err error) {
+	hash, result := strings.CutPrefix(id, "result-")
+	if !result {
+		path = filepath.Join(output, fmt.Sprintf("turn-%d-playback-%d.pcm", turn, part))
+		return path, false, os.WriteFile(path, pcm, 0600)
+	}
+	if raw, err := hex.DecodeString(hash); err != nil || len(raw) != 32 {
+		return "", false, errors.New("invalid result playback ID")
+	}
+	path = filepath.Join(output, id+".pcm")
+	if _, err := os.Stat(path); err == nil {
+		return path, true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	file, err := os.CreateTemp(output, ".result-*.pcm")
+	if err != nil {
+		return "", false, err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(pcm)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return "", false, err
+	}
+	// Linking publishes the complete file without overwriting an existing result.
+	if err := os.Link(file.Name(), path); errors.Is(err, os.ErrExist) {
+		return path, true, nil
+	} else if err != nil {
+		return "", false, err
+	}
+	return path, false, nil
 }

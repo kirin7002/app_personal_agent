@@ -220,3 +220,32 @@ func TestBailianEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestProbeReadAloudUsesMatchingResponse(t *testing.T) {
+	const text = "左后车窗已关闭。"
+	factory := newFake(t, time.Second, func(ctx context.Context, c *websocket.Conn) {
+		if !fakeSetup(t, ctx, c) {
+			return
+		}
+		if expect(t, ctx, c, "conversation.item.create") == nil ||
+			!send(t, ctx, c, "conversation.item.created", map[string]any{"item": map[string]string{"id": "input"}}) ||
+			expect(t, ctx, c, "response.create") == nil {
+			return
+		}
+		send(t, ctx, c, "response.created", map[string]any{"response": map[string]string{"id": "speech"}})
+		send(t, ctx, c, "response.audio_transcript.done", map[string]any{"response_id": "other", "transcript": "ignore"})
+		send(t, ctx, c, "response.audio.delta", map[string]any{"response_id": "speech", "delta": []byte{1, 2}})
+		send(t, ctx, c, "response.audio_transcript.done", map[string]any{"response_id": "speech", "transcript": text})
+		send(t, ctx, c, "response.done", map[string]any{"response": map[string]string{"id": "speech", "status": "completed"}})
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var received []byte
+	spoken, err := factory.ProbeReadAloud(ctx, text, func(pcm []byte) error {
+		received = append(received, pcm...)
+		return nil
+	})
+	if err != nil || spoken != text || len(received) != 2 {
+		t.Fatalf("unexpected read-aloud result transcript=%q audio=%v err=%v", spoken, received, err)
+	}
+}

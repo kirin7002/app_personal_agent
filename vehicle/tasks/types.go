@@ -127,6 +127,8 @@ type Store interface {
 	// Outbox & H05 execution lifecycle methods.
 	ClaimNextCommand(ctx context.Context, workerID string, leaseTTL time.Duration, now time.Time) (*OutboxCommand, error)
 	GetCommand(ctx context.Context, commandID string) (*OutboxCommand, error)
+	// BeginCommandSend durably fences the current lease before transport sees the command.
+	BeginCommandSend(ctx context.Context, commandID, workerID string, attempt uint32, now time.Time) (bool, error)
 	MarkCommandExecuting(ctx context.Context, commandID, workerID string, dispatchedAt time.Time, downstreamID string) error
 	ReleaseCommandForRetry(ctx context.Context, commandID, workerID string, retryAt time.Time, lastErr string) error
 	TransitionCommandOutcome(ctx context.Context, commandID string, next contract.Status, reason string, occurredAt time.Time) (bool, *contract.VehicleResultEvent, error)

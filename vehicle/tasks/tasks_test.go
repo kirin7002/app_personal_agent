@@ -412,10 +412,10 @@ func (e *emptyRows) Close() error                   { return nil }
 func (e *emptyRows) Next([]driver.Value) error      { return io.EOF }
 
 func TestMySQLStoreRollbackAndTurnLockInSingleTx(t *testing.T) {
-	// Ensure embedded SQL DDL parses cleanly into 4 CREATE TABLE statements.
+	// Ensure embedded SQL DDL parses cleanly into 5 CREATE TABLE statements.
 	stmts := EnsureSQLSchemaStatements()
-	if len(stmts) != 4 {
-		t.Fatalf("expected 4 DDL statements in tasks.sql, got %d", len(stmts))
+	if len(stmts) != 5 {
+		t.Fatalf("expected 5 DDL statements in tasks.sql, got %d", len(stmts))
 	}
 
 	drv := &mockSQLDriver{failOnQuery: "INSERT INTO vehicle_command_outbox"}

@@ -76,3 +76,11 @@ CREATE TABLE IF NOT EXISTS vehicle_result_events (
     PRIMARY KEY (event_id),
     KEY vehicle_result_events_scope_idx (scope_key, occurred_at, event_id)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS vehicle_playback_receipts (
+    scope_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    playback_id VARBINARY(128) NOT NULL,
+    settled_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (scope_key, playback_id),
+    KEY vehicle_playback_receipts_expiration (settled_at)
+) ENGINE=InnoDB;
