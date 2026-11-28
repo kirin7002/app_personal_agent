@@ -52,9 +52,11 @@ type config struct {
 	DashScopeAPIKey  string
 	DashScopeRegion  string
 	DashScopeSpaceID string
-	DashScopeModel   string
-	DashScopeVoice   string
-	DebugEndpoints   bool
+	DashScopeModel      string
+	DashScopeVoice      string
+	DebugEndpoints      bool
+	WebDir              string
+	RequireSessionToken bool
 }
 
 func envOr(key, fallback string) string {
@@ -98,6 +100,8 @@ func parseConfig() config {
 	flag.StringVar(&cfg.DashScopeModel, "dashscope-model", strings.TrimSpace(os.Getenv("DASHSCOPE_MODEL")), "Optional Qwen Realtime model override")
 	flag.StringVar(&cfg.DashScopeVoice, "dashscope-voice", strings.TrimSpace(os.Getenv("DASHSCOPE_VOICE")), "Optional Qwen Realtime voice override")
 	flag.BoolVar(&cfg.DebugEndpoints, "debug", envBool("DEBUG_ENDPOINTS", true), "Expose /debug/state and /debug/receipt behind DEMO_AUTH_TOKEN")
+	flag.StringVar(&cfg.WebDir, "web-dir", strings.TrimSpace(os.Getenv("WEB_DIR")), "Optional local directory overriding embedded cmd/server/web static assets")
+	flag.BoolVar(&cfg.RequireSessionToken, "require-session-token", envBool("DEMO_REQUIRE_SESSION_TOKEN", false), "Require token/Bearer on POST /api/session before issuing browser Cookie")
 	flag.Parse()
 	return cfg
 }
@@ -139,6 +143,7 @@ type demoApp struct {
 	worker        *executor.Worker
 	expiryWorker  *tasks.ExpiryWorker
 	events        *EventBus
+	sessions      *sessionStore
 	publicHandler http.Handler
 	mcpHandler    http.Handler
 	voiceEnabled  bool
@@ -330,19 +335,24 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 		worker:       worker,
 		expiryWorker: expiryWorker,
 		events:       eventBus,
+		sessions:     newSessionStore(),
 		voiceEnabled: voiceEnabled,
 		ttsBackend:   ttsBackend,
 	}
 
 	pubMux := http.NewServeMux()
 	pubMux.HandleFunc("/healthz", app.handleHealth)
+	pubMux.HandleFunc("/api/session", app.handleSession)
+	pubMux.HandleFunc("/api/config", app.handleAPIConfig)
+	pubMux.HandleFunc("/api/capabilities", app.handleAPICapabilities)
+	pubMux.HandleFunc("/api/state", app.handleAPIState)
 	pubMux.HandleFunc("/api/events/stream", app.handleEventsStream)
-	pubMux.Handle("/voice/utterances", turns.UtteranceHandlerWithOptions(turnService, auth, turns.UtteranceOptions{
+	pubMux.Handle("/voice/utterances", app.withSessionAuth(turns.UtteranceHandlerWithOptions(turnService, auth, turns.UtteranceOptions{
 		OnUtteranceAccepted: func(scope contract.Scope, turnID, requestID, text string) {
 			eventBus.PublishUserMessage(scope, turnID, requestID, "text", text)
 		},
 		SubscribeSteps: eventBus.SubscribeRequestSteps,
-	}))
+	})))
 	if voiceEnabled {
 		gw := &gateway.Gateway{
 			Auth:    auth,
@@ -354,7 +364,7 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 			Logger:  logger,
 			OnEvent: eventBus.HandleGatewayEvent,
 		}
-		pubMux.Handle("/voice/audio", gw)
+		pubMux.Handle("/voice/audio", app.withSessionAuth(gw))
 	} else {
 		pubMux.HandleFunc("/voice/audio", func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "voice gateway disabled: set DASHSCOPE_API_KEY to enable /voice/audio (text /voice/utterances is active)", http.StatusServiceUnavailable)
@@ -364,6 +374,7 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 		pubMux.HandleFunc("/debug/state", app.handleDebugState)
 		pubMux.HandleFunc("/debug/receipt", app.handleDebugReceipt)
 	}
+	pubMux.HandleFunc("/", app.handleStatic)
 	app.publicHandler = pubMux
 
 	mcpMux := http.NewServeMux()
@@ -416,14 +427,6 @@ func (a *demoApp) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (a *demoApp) authorizeDebug(r *http.Request) bool {
-	scheme, bearer, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(bearer), []byte(a.cfg.DemoAuthToken)) == 1
-}
-
 var demoSignalNames = []string{
 	"window.front_left",
 	"window.front_right",
@@ -434,22 +437,10 @@ var demoSignalNames = []string{
 }
 
 func (a *demoApp) handleEventsStream(w http.ResponseWriter, r *http.Request) {
-	if !a.authorizeDebug(r) {
+	scope, ok := a.authorizeRequest(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
-	}
-	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
-	if sessionID == "" {
-		sessionID = "web-demo-01"
-	}
-	vehicleID := strings.TrimSpace(r.URL.Query().Get("vehicle_id"))
-	if vehicleID == "" {
-		vehicleID = a.cfg.DemoVehicleID
-	}
-	scope := contract.Scope{
-		UserID:    a.cfg.DemoUserID,
-		SessionID: sessionID,
-		VehicleID: vehicleID,
 	}
 	a.events.ServeSSE(w, r, scope)
 }
@@ -460,22 +451,19 @@ func (a *demoApp) handleDebugState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.authorizeDebug(r) {
+	scope, ok := a.authorizeRequest(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
-	if sessionID == "" {
-		sessionID = "car-test"
+	if strings.TrimSpace(r.URL.Query().Get("session_id")) == "" {
+		if _, hasCookie := a.lookupSessionCookie(r); !hasCookie {
+			scope.SessionID = "car-test"
+		}
 	}
-	vehicleID := strings.TrimSpace(r.URL.Query().Get("vehicle_id"))
-	if vehicleID == "" {
-		vehicleID = a.cfg.DemoVehicleID
-	}
-	scope := contract.Scope{UserID: a.cfg.DemoUserID, SessionID: sessionID, VehicleID: vehicleID}
 	now := time.Now().UTC()
 
-	signals, _ := a.telemetry.ReadSignals(r.Context(), vehicleID, demoSignalNames)
+	signals, _ := a.telemetry.ReadSignals(r.Context(), scope.VehicleID, demoSignalNames)
 	pending, err := a.taskStore.ListPending(r.Context(), scope, now)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -501,7 +489,7 @@ func (a *demoApp) handleDebugReceipt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.authorizeDebug(r) {
+	if _, ok := a.authorizeRequest(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
