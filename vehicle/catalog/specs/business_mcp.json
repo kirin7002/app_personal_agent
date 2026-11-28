@@ -1,0 +1,985 @@
+{
+  "version": "2026.1-business-mcp",
+  "default_disable_tools": [
+    "ac_appoint_ctrl",
+    "child_seat_vent_ctrl",
+    "deeplink_ctrl",
+    "car_signal_status",
+    "car_prepare_ctrl"
+  ],
+  "operations": [
+    {
+      "device": "hvac",
+      "tool": "ac_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "ac_ctrl",
+      "title": "空调控制",
+      "category": "空调舒适",
+      "description": "控制车内空调开关、温度、风量、模式、除霜、内外循环及预设模式",
+      "aliases": ["空调", "开空调", "关空调", "调空调", "调温度", "设温度", "风量", "风速", "制冷", "制热", "除霜", "除雾", "内外循环", "极速制冷", "极速制热", "快速除味"],
+      "utterances": ["打开空调调到24度", "空调温度调高2度", "把空调风量调大一档", "打开风挡除霜", "开启内循环", "关闭空调"],
+      "anti_examples": ["空调开着吗", "现在车内多少度", "空调状态", "预约空调"],
+      "mutually_exclusive": [
+        ["temperature", "temperature_tune"],
+        ["wind_level", "wind_level_tune"]
+      ],
+      "fields": [
+        {
+          "name": "power",
+          "type": "string",
+          "required": true,
+          "enum": ["on", "off"],
+          "enum_labels": { "on": ["打开", "开启"], "off": ["关闭"] },
+          "question": "要打开还是关闭空调？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "on": ["打开空调", "开空调", "开启空调", "空调开", "调高", "调低", "调到", "设成", "制冷", "制热", "除霜", "除雾", "内循环", "外循环", "打开", "开启"],
+              "off": ["关闭空调", "关空调", "空调关", "关闭"]
+            }
+          }
+        },
+        {
+          "name": "premode",
+          "type": "string",
+          "enum": ["1", "2", "3", "4", "5", "6", "7", "8"],
+          "enum_labels": {
+            "1": ["极速制冷"],
+            "2": ["极速制热"],
+            "3": ["快速除味"],
+            "4": ["打开风挡除霜", "除霜", "除雾"],
+            "5": ["关闭风挡除霜"],
+            "6": ["关闭极速制冷"],
+            "7": ["关闭极速制热"],
+            "8": ["关闭快速除味"]
+          }
+        },
+        { "name": "operate", "type": "string", "enum": ["auto", "manual"] },
+        {
+          "name": "temperature",
+          "type": "string",
+          "dynamic_bound": "temperature_c",
+          "extractor": {
+            "kind": "number",
+            "unit_pattern": "(?:度|℃|°c|c)?",
+            "min": 16,
+            "max": 32,
+            "allow_bare_number": true
+          }
+        },
+        {
+          "name": "temperature_tune",
+          "type": "string",
+          "extractor": {
+            "kind": "relative_tune",
+            "unit_pattern": "(?:度|℃|°c)?"
+          }
+        },
+        {
+          "name": "wind_level",
+          "type": "string",
+          "extractor": {
+            "kind": "number",
+            "unit_pattern": "(?:档|挡|级)",
+            "min": 1,
+            "max": 8
+          }
+        },
+        {
+          "name": "wind_level_tune",
+          "type": "string",
+          "extractor": {
+            "kind": "relative_tune",
+            "unit_pattern": "(?:档|挡|级)?"
+          }
+        },
+        { "name": "mode", "type": "string", "enum": ["nohotcold", "hot", "cold"] },
+        { "name": "windshield_switch", "type": "string", "enum": ["on", "off"] },
+        { "name": "circle", "type": "string", "enum": ["in", "out"] }
+      ],
+      "guard": {
+        "device_keywords": ["空调", "温度", "风量", "风速", "制冷", "制热", "冷风", "暖风", "除霜", "除雾", "循环", "除味"],
+        "positive_verbs": ["开", "打开", "开启", "关", "关闭", "调", "设", "升", "降", "加大", "减小"],
+        "relative_action_keywords": ["调高", "调低", "升高", "降低", "调大", "调小", "加大", "减小", "高一点", "低一点"]
+      }
+    },
+    {
+      "device": "seat",
+      "tool": "seat_heat_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "seat_heat_ctrl",
+      "title": "座椅加热",
+      "category": "座椅舒适",
+      "description": "控制指定位置座椅加热的开关或档位（1-3档）",
+      "aliases": ["座椅加热", "主驾加热", "副驾加热", "后排加热", "屁股加热", "座垫加热"],
+      "utterances": ["打开主驾座椅加热", "把副驾座椅加热调到2档", "关闭后排座椅加热"],
+      "anti_examples": ["座椅通风", "方向盘加热", "电池加热", "后视镜加热"],
+      "require_any_of": [["power", "level"]],
+      "fields": [
+        {
+          "name": "positionList",
+          "type": "string",
+          "required": true,
+          "question": "要调节哪个位置的座椅加热？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "front_left": ["主驾", "驾驶座", "左前", "前排左"],
+              "front_right": ["副驾", "右前", "前排右"],
+              "rear_left": ["左后", "后排左", "二排左"],
+              "rear_right": ["右后", "后排右", "二排右"],
+              "all": ["全部", "所有座椅", "全车"]
+            }
+          }
+        },
+        {
+          "name": "power",
+          "type": "string",
+          "enum": ["on", "off"],
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "on": ["打开", "开启", "开"],
+              "off": ["关闭", "关"]
+            }
+          }
+        },
+        {
+          "name": "level",
+          "type": "integer",
+          "min": 1,
+          "max": 3,
+          "extractor": {
+            "kind": "integer",
+            "unit_pattern": "(?:档|挡|级)?",
+            "min": 1,
+            "max": 3,
+            "allow_bare_number": true
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["座椅加热", "座椅", "加热"],
+        "positive_verbs": ["开", "打开", "开启", "关", "关闭", "调", "设"]
+      }
+    },
+    {
+      "device": "seat",
+      "tool": "seat_vent_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "seat_vent_ctrl",
+      "title": "座椅通风",
+      "category": "座椅舒适",
+      "description": "控制指定位置座椅通风的开关或档位（1-3档）",
+      "aliases": ["座椅通风", "主驾通风", "副驾通风", "后排通风", "座椅吹风"],
+      "utterances": ["打开主驾座椅通风", "把副驾座椅通风调到3档", "关闭座椅通风"],
+      "anti_examples": ["座椅加热", "儿童座椅通风", "空调风量"],
+      "require_any_of": [["power", "level"]],
+      "fields": [
+        {
+          "name": "positionList",
+          "type": "string",
+          "required": true,
+          "question": "要调节哪个位置的座椅通风？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "front_left": ["主驾", "驾驶座", "左前"],
+              "front_right": ["副驾", "右前"],
+              "rear_left": ["左后", "后排左"],
+              "rear_right": ["右后", "后排右"],
+              "all": ["全部", "全车"]
+            }
+          }
+        },
+        {
+          "name": "power",
+          "type": "string",
+          "enum": ["on", "off"],
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "on": ["打开", "开启", "开"], "off": ["关闭", "关"] }
+          }
+        },
+        {
+          "name": "level",
+          "type": "integer",
+          "min": 1,
+          "max": 3,
+          "extractor": { "kind": "integer", "unit_pattern": "(?:档|挡|级)?", "min": 1, "max": 3, "allow_bare_number": true }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["座椅通风", "座椅", "通风"],
+        "positive_verbs": ["开", "打开", "开启", "关", "关闭", "调", "设"]
+      }
+    },
+    {
+      "device": "seat",
+      "tool": "row23_mode_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "row23_mode_ctrl",
+      "title": "后排座椅模式",
+      "category": "座椅舒适",
+      "description": "控制二三排座椅复位或放倒模式",
+      "aliases": ["后排座椅模式", "二排座椅", "三排座椅", "座椅复位", "座椅放倒"],
+      "utterances": ["把后排座椅复位", "放倒二三排座椅"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["reset", "back"],
+          "enum_labels": { "reset": ["复位", "还原"], "back": ["放倒", "后仰"] },
+          "question": "后排座椅要复位还是放倒？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "reset": ["复位", "还原", "恢复"], "back": ["放倒", "后仰", "折叠"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["后排座椅", "二排", "三排", "座椅"],
+        "positive_verbs": ["复位", "放倒", "还原", "折叠"]
+      }
+    },
+    {
+      "device": "lock",
+      "tool": "car_lock_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "car_lock_ctrl",
+      "title": "车门解锁与闭锁",
+      "category": "车身安全",
+      "description": "控制车辆门锁解锁或闭锁",
+      "aliases": ["锁车", "闭锁", "解锁", "开锁", "车门锁", "中控锁"],
+      "utterances": ["帮我锁车", "把车门锁上", "解锁车辆"],
+      "anti_examples": ["充电枪解锁", "车锁了吗"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["unlock", "lock"],
+          "enum_labels": { "unlock": ["解锁", "开锁"], "lock": ["锁车", "闭锁", "上锁"] },
+          "question": "要解锁还是闭锁车辆？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "unlock": ["解锁", "开锁", "打开车锁"],
+              "lock": ["锁车", "闭锁", "上锁", "锁上", "锁门"]
+            }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["锁车", "闭锁", "解锁", "开锁", "车门", "车锁", "门锁"],
+        "positive_verbs": ["锁", "闭锁", "解锁", "开锁"],
+        "sensitive_confirm": true
+      }
+    },
+    {
+      "device": "window",
+      "tool": "car_window_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "car_window_ctrl",
+      "title": "车窗开度控制",
+      "category": "车身控制",
+      "description": "控制车窗全关、透气缝、半开或全开（open_pct: 0/2/5/10）",
+      "aliases": ["车窗", "关窗", "开窗", "车窗透气", "升窗", "降窗", "窗户", "车门玻璃"],
+      "utterances": ["把车窗全关上", "车窗开一点透气", "打开车窗"],
+      "anti_examples": ["天窗", "遮阳帘", "车窗关了吗", "车窗状态"],
+      "fields": [
+        {
+          "name": "open_pct",
+          "type": "string",
+          "required": true,
+          "enum": ["0", "2", "5", "10"],
+          "enum_labels": { "0": ["关闭", "全关"], "2": ["透气", "一条缝"], "5": ["半开"], "10": ["全开", "打开"] },
+          "question": "车窗要关闭、透气、半开还是全开？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "0": ["关", "关闭", "全关", "升窗", "摇上"],
+              "2": ["透气", "留缝", "一条缝", "微开"],
+              "5": ["半开", "一半"],
+              "10": ["全开", "打开", "开窗", "降窗", "摇下"]
+            }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["车窗", "窗户", "玻璃", "关窗", "开窗", "升窗", "降窗"],
+        "positive_verbs": ["关", "开", "升", "降", "透气", "摇上", "摇下"]
+      }
+    },
+    {
+      "device": "door",
+      "tool": "sliding_door_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "sliding_door_ctrl",
+      "title": "侧滑门控制",
+      "category": "车身控制",
+      "description": "控制左/右侧电动侧滑门打开或关闭（0=关，100=开）",
+      "aliases": ["侧滑门", "电滑门", "滑门", "电动门", "左滑门", "右滑门"],
+      "utterances": ["打开右侧滑门", "关闭左侧滑门"],
+      "fields": [
+        {
+          "name": "positionList",
+          "type": "string",
+          "required": true,
+          "question": "要控制左侧还是右侧滑门？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "left": ["左", "左侧", "左边", "左滑门"],
+              "right": ["右", "右侧", "右边", "右滑门"],
+              "both": ["两边", "双侧", "全部"]
+            }
+          }
+        },
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["0", "100"],
+          "enum_labels": { "0": ["关闭"], "100": ["打开"] },
+          "question": "要打开还是关闭侧滑门？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "0": ["关", "关闭"], "100": ["开", "打开"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["侧滑门", "电滑门", "滑门", "电动门"],
+        "positive_verbs": ["开", "打开", "关", "关闭"]
+      }
+    },
+    {
+      "device": "trunk",
+      "tool": "front_trunk_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "front_trunk_ctrl",
+      "title": "前备箱控制",
+      "category": "车身控制",
+      "description": "控制前备箱打开或关闭（0=关，100=开）",
+      "aliases": ["前备箱", "前备厢", "前舱盖", "前盖", "机盖"],
+      "utterances": ["打开前备箱", "关闭前备箱"],
+      "anti_examples": ["后备箱", "尾门"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["0", "100"],
+          "enum_labels": { "0": ["关闭"], "100": ["打开"] },
+          "question": "要打开还是关闭前备箱？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "0": ["关", "关闭"], "100": ["开", "打开"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["前备箱", "前备厢", "前舱", "前盖"],
+        "positive_verbs": ["开", "打开", "关", "关闭"],
+        "sensitive_confirm": true
+      }
+    },
+    {
+      "device": "trunk",
+      "tool": "trunk_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "trunk_ctrl",
+      "title": "后备箱控制",
+      "category": "车身控制",
+      "description": "控制后备箱/电动尾门打开或关闭（true=开，false=关）",
+      "aliases": ["后备箱", "后备厢", "尾门", "尾箱", "行李箱"],
+      "utterances": ["打开后备箱", "把尾门关上"],
+      "anti_examples": ["前备箱", "前盖"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["true", "false"],
+          "enum_labels": { "true": ["打开"], "false": ["关闭"] },
+          "question": "要打开还是关闭后备箱？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "true": ["开", "打开"], "false": ["关", "关闭"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["后备箱", "后备厢", "尾门", "尾箱", "行李箱"],
+        "positive_verbs": ["开", "打开", "关", "关闭"],
+        "sensitive_confirm": true
+      }
+    },
+    {
+      "device": "sunroof",
+      "tool": "sunroof_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "sunroof_ctrl",
+      "title": "天窗控制",
+      "category": "车身控制",
+      "description": "控制天窗关闭、起翘透气或全开（0/1/10）",
+      "aliases": ["天窗", "开天窗", "关天窗", "天窗透气", "天窗起翘"],
+      "utterances": ["打开天窗", "把天窗关上", "天窗起翘透气"],
+      "anti_examples": ["车窗", "遮阳帘"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["0", "1", "10"],
+          "enum_labels": { "0": ["关闭"], "1": ["起翘", "透气"], "10": ["打开", "全开"] },
+          "question": "天窗要关闭、透气还是全开？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "0": ["关", "关闭"], "1": ["起翘", "透气", "微开"], "10": ["开", "打开", "全开"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["天窗"],
+        "positive_verbs": ["开", "打开", "关", "关闭", "起翘", "透气"]
+      }
+    },
+    {
+      "device": "sunshade",
+      "tool": "sunshade_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "sunshade_ctrl",
+      "title": "遮阳帘控制",
+      "category": "车身控制",
+      "description": "控制天窗遮阳帘关闭、半开或全开（0/1/10）",
+      "aliases": ["遮阳帘", "天幕遮阳帘", "防晒帘", "遮光帘"],
+      "utterances": ["打开遮阳帘", "关闭遮阳帘"],
+      "anti_examples": ["天窗", "车窗"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["0", "1", "10"],
+          "enum_labels": { "0": ["关闭"], "1": ["半开"], "10": ["打开", "全开"] },
+          "question": "遮阳帘要打开、半开还是关闭？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "0": ["关", "关闭", "拉上"], "1": ["半开", "一半"], "10": ["开", "打开", "拉开"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["遮阳帘", "防晒帘", "遮光帘"],
+        "positive_verbs": ["开", "打开", "关", "关闭", "拉"]
+      }
+    },
+    {
+      "device": "steering_wheel",
+      "tool": "steer_wheel_heat_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "steer_wheel_heat_ctrl",
+      "title": "方向盘加热",
+      "category": "舒适加热",
+      "description": "打开或关闭方向盘加热",
+      "aliases": ["方向盘加热", "方向盘热", "暖方向盘"],
+      "utterances": ["打开方向盘加热", "关闭方向盘加热"],
+      "anti_examples": ["座椅加热", "后视镜加热", "电池加热"],
+      "fields": [
+        {
+          "name": "power",
+          "type": "string",
+          "required": true,
+          "enum": ["on", "off"],
+          "question": "要打开还是关闭方向盘加热？",
+          "extractor": { "kind": "enum_alias", "value_aliases": { "on": ["开", "打开", "开启"], "off": ["关", "关闭"] } }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["方向盘"],
+        "positive_verbs": ["开", "打开", "开启", "关", "关闭", "加热"]
+      }
+    },
+    {
+      "device": "mirror",
+      "tool": "mirror_heat_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "mirror_heat_ctrl",
+      "title": "后视镜加热",
+      "category": "舒适加热",
+      "description": "打开或关闭外后视镜加热除雾",
+      "aliases": ["后视镜加热", "倒车镜加热", "反光镜加热", "后视镜除雾"],
+      "utterances": ["打开后视镜加热", "关闭后视镜加热"],
+      "anti_examples": ["方向盘加热", "座椅加热", "风挡除霜"],
+      "fields": [
+        {
+          "name": "power",
+          "type": "string",
+          "required": true,
+          "enum": ["on", "off"],
+          "question": "要打开还是关闭后视镜加热？",
+          "extractor": { "kind": "enum_alias", "value_aliases": { "on": ["开", "打开", "开启"], "off": ["关", "关闭"] } }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["后视镜", "倒车镜", "反光镜"],
+        "positive_verbs": ["开", "打开", "开启", "关", "关闭", "加热", "除雾"]
+      }
+    },
+    {
+      "device": "battery",
+      "tool": "bat_heat_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "bat_heat_ctrl",
+      "title": "电池加热",
+      "category": "充电与能源",
+      "description": "立即开启或关闭动力电池预热/加热（ptcon/ptcoff）",
+      "aliases": ["电池加热", "电池预热", "动力电池预热"],
+      "utterances": ["开启电池加热", "关闭电池预热"],
+      "anti_examples": ["预约电池加热", "定时电池预热"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["ptcon", "ptcoff"],
+          "enum_labels": { "ptcon": ["开启", "打开"], "ptcoff": ["关闭"] },
+          "question": "要开启还是关闭电池加热？",
+          "extractor": { "kind": "enum_alias", "value_aliases": { "ptcon": ["开", "打开", "开启", "启动"], "ptcoff": ["关", "关闭", "停止"] } }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["电池加热", "电池预热", "电池"],
+        "positive_verbs": ["开", "打开", "开启", "启动", "关", "关闭", "停止"]
+      }
+    },
+    {
+      "device": "charging",
+      "tool": "charge_start_stop_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "charge_start_stop_ctrl",
+      "title": "启停充电",
+      "category": "充电与能源",
+      "description": "立即启动或停止车辆充电（start/finish）",
+      "aliases": ["开始充电", "启动充电", "停止充电", "结束充电", "充上电"],
+      "utterances": ["开始充电", "停止充电"],
+      "anti_examples": ["预约充电", "充电上限", "充电枪解锁", "健康充电", "正在充电吗"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["start", "finish"],
+          "enum_labels": { "start": ["开始", "启动"], "finish": ["停止", "结束"] },
+          "question": "要启动充电还是停止充电？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": { "start": ["开始", "启动", "打开", "充"], "finish": ["停止", "结束", "关闭", "断"] }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["充电"],
+        "positive_verbs": ["开始", "启动", "停止", "结束"]
+      }
+    },
+    {
+      "device": "charging",
+      "tool": "charger_unlock_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "charger_unlock_ctrl",
+      "title": "充电枪解锁",
+      "category": "充电与能源",
+      "description": "解锁车端充电枪接口以便拔枪",
+      "aliases": ["充电枪解锁", "解锁充电枪", "拔枪", "解开充电枪"],
+      "utterances": ["解锁充电枪", "帮我把充电枪解锁"],
+      "anti_examples": ["解锁车辆", "锁车"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["unlock"],
+          "question": "确认要解锁充电枪吗？",
+          "extractor": { "kind": "enum_alias", "value_aliases": { "unlock": ["解锁", "解开", "拔枪"] } }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["充电枪", "拔枪"],
+        "positive_verbs": ["解锁", "解开", "拔"]
+      }
+    },
+    {
+      "device": "charging",
+      "tool": "healthy_charge_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "healthy_charge_ctrl",
+      "title": "健康充电控制",
+      "category": "充电与能源",
+      "description": "开启或关闭电池健康充电保护模式",
+      "aliases": ["健康充电", "电池保护充电", "护电模式"],
+      "utterances": ["打开健康充电", "关闭健康充电模式"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["on", "off"],
+          "question": "要打开还是关闭健康充电？",
+          "extractor": { "kind": "enum_alias", "value_aliases": { "on": ["开", "打开", "开启"], "off": ["关", "关闭"] } }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["健康充电", "护电"],
+        "positive_verbs": ["开", "打开", "开启", "关", "关闭"]
+      }
+    },
+    {
+      "device": "horn",
+      "tool": "horn_honk_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "horn_honk_ctrl",
+      "title": "鸣笛寻车",
+      "category": "寻车提醒",
+      "description": "远程触发鸣笛闪灯寻车（true/false）",
+      "aliases": ["鸣笛寻车", "寻车", "闪灯鸣笛", "按喇叭", "双闪寻车", "找车"],
+      "utterances": ["帮我鸣笛寻车", "闪灯鸣笛找一下车"],
+      "fields": [
+        {
+          "name": "operate",
+          "type": "string",
+          "required": true,
+          "enum": ["true", "false"],
+          "question": "要开启还是停止鸣笛寻车？",
+          "extractor": { "kind": "enum_alias", "value_aliases": { "true": ["鸣笛", "寻车", "找车", "按喇叭", "开", "打开"], "false": ["关", "停止"] } }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["鸣笛", "寻车", "找车", "喇叭", "闪灯"],
+        "positive_verbs": ["鸣笛", "寻", "找", "按", "开", "停"]
+      }
+    },
+    {
+      "device": "navigation",
+      "tool": "navi_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "navi_ctrl",
+      "title": "车机导航下发",
+      "category": "导航出行",
+      "description": "将目标地点的名称、经纬度和地址下发到车机开始导航",
+      "aliases": ["车机导航", "导航去", "发送地址到车", "路线导航"],
+      "utterances": ["导航去杭州西湖", "把目的地发送到车机导航"],
+      "fields": [
+        { "name": "name", "type": "string", "required": true, "question": "要导航去哪个目的地？", "extractor": { "kind": "free_text" } },
+        { "name": "longitude", "type": "string", "required": true, "extractor": { "kind": "free_text" } },
+        { "name": "latitude", "type": "string", "required": true, "extractor": { "kind": "free_text" } },
+        { "name": "address", "type": "string", "required": true, "extractor": { "kind": "free_text" } },
+        { "name": "id", "type": "string", "required": true, "extractor": { "kind": "free_text" } }
+      ],
+      "guard": {
+        "device_keywords": ["导航", "目的地", "路线", "去"],
+        "positive_verbs": ["导航", "去", "发送"]
+      }
+    },
+    {
+      "device": "charging",
+      "tool": "timed_charge_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "timed_charge_ctrl",
+      "title": "预约充电",
+      "category": "预约车控",
+      "description": "设置预约充电开关、起止时间、目标充电上限 SOC 及周期",
+      "aliases": ["预约充电", "定时充电", "谷电充电", "充电上限"],
+      "utterances": ["设置今晚11点开始预约充电", "把充电上限调到90%", "关闭预约充电"],
+      "anti_examples": ["立即充电", "开始充电", "查询预约充电"],
+      "mutually_exclusive": [["chargesoc", "chargesoc_tune"]],
+      "fields": [
+        { "name": "power", "type": "string", "enum": ["on", "off"] },
+        { "name": "starttime", "type": "string" },
+        { "name": "endtime", "type": "string" },
+        { "name": "chargesoc", "type": "string" },
+        { "name": "chargesoc_tune", "type": "string" },
+        { "name": "recharge", "type": "string", "enum": ["0", "1"] },
+        { "name": "cyclesList", "type": "array_integer" },
+        { "name": "circulation", "type": "string", "enum": ["0", "1"] }
+      ],
+      "guard": {
+        "device_keywords": ["预约充电", "定时充电", "充电上限", "谷电"],
+        "positive_verbs": ["预约", "定时", "设", "调", "开", "关"]
+      }
+    },
+    {
+      "device": "battery",
+      "tool": "timed_bat_heat_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "timed_bat_heat_ctrl",
+      "title": "预约电池加热",
+      "category": "预约车控",
+      "description": "设置定时/预约电池预热的开关、时间与重复周期",
+      "aliases": ["预约电池加热", "预约电池预热", "定时电池加热", "定时电池预热"],
+      "utterances": ["预约明早7点电池预热", "取消预约电池加热"],
+      "anti_examples": ["立即电池加热"],
+      "fields": [
+        { "name": "power", "type": "string", "required": true, "enum": ["on", "off"], "question": "要开启还是关闭预约电池加热？" },
+        { "name": "start_time", "type": "string" },
+        { "name": "days", "type": "string" }
+      ],
+      "guard": {
+        "device_keywords": ["预约电池", "定时电池", "电池预热", "电池加热"],
+        "positive_verbs": ["预约", "定时", "开", "关", "设"]
+      }
+    },
+    {
+      "device": "hvac",
+      "tool": "ac_appoint_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "ac_appoint_ctrl",
+      "title": "预约空调",
+      "category": "预约车控",
+      "description": "预约定时开启空调及目标参数",
+      "aliases": ["预约空调", "定时开空调"],
+      "utterances": ["预约明天早上8点开空调"],
+      "disabled_by_default": true,
+      "mutually_exclusive": [
+        ["temperature", "temperature_tune"],
+        ["wind_level", "wind_level_tune"]
+      ],
+      "fields": [
+        { "name": "power", "type": "string", "required": true, "enum": ["on", "off"] },
+        { "name": "start_time", "type": "string", "required": true },
+        { "name": "days", "type": "string", "required": true },
+        { "name": "premode", "type": "string", "enum": ["1", "2", "3", "4", "5", "6", "7", "8"] },
+        { "name": "operate", "type": "string", "enum": ["auto", "manual"] },
+        { "name": "temperature", "type": "string", "dynamic_bound": "temperature_c" },
+        { "name": "temperature_tune", "type": "string" },
+        { "name": "wind_level", "type": "string" },
+        { "name": "wind_level_tune", "type": "string" },
+        { "name": "mode", "type": "string", "enum": ["nohotcold", "hot", "cold"] },
+        { "name": "windshield_switch", "type": "string", "enum": ["on", "off"] },
+        { "name": "circle", "type": "string", "enum": ["in", "out"] }
+      ]
+    },
+    {
+      "device": "seat",
+      "tool": "child_seat_vent_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "child_seat_vent_ctrl",
+      "title": "儿童座椅通风",
+      "category": "座椅舒适",
+      "description": "控制绑定儿童安全座椅的通风开关",
+      "aliases": ["儿童座椅通风", "安全座椅通风"],
+      "utterances": ["打开儿童座椅通风"],
+      "disabled_by_default": true,
+      "fields": [
+        { "name": "power", "type": "string", "required": true, "enum": ["on", "off"] },
+        { "name": "mac", "type": "string" }
+      ]
+    },
+    {
+      "device": "app",
+      "tool": "deeplink_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "deeplink_ctrl",
+      "title": "App 页面跳转",
+      "category": "应用跳转",
+      "description": "跳转到 App 指定功能页面（仅当用户明确要求打开应用页面或界面时使用）",
+      "aliases": ["打开页面", "页面跳转", "功能入口", "跳转界面"],
+      "utterances": ["打开App里的FOTA升级页面", "跳转到冰箱设置界面"],
+      "gate_keywords": ["页面", "界面", "跳转", "应用", "app", "入口", "深链", "菜单"],
+      "gated_terms": ["app_control", "fota", "fridge", "schedule_sync", "sentry", "charge_map", "ota", "冰箱", "升级", "日程同步"],
+      "disabled_by_default": true,
+      "fields": [
+        {
+          "name": "feature",
+          "type": "string",
+          "required": true,
+          "enum": [
+            "app_control", "fota", "fridge", "schedule_sync",
+            "sentry_mode", "digital_key", "charge_map", "trip_log",
+            "vehicle_settings", "tire_pressure", "service_booking"
+          ]
+        },
+        { "name": "deviceType", "type": "string", "required": true, "enum": ["ios", "android", "harmony"] }
+      ]
+    },
+    {
+      "device": "hvac",
+      "tool": "car_airconditioner_status",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "car_airconditioner_status",
+      "title": "查询空调状态",
+      "category": "车况查询",
+      "description": "查询车内温度、空调开关状态、设定温度和风量",
+      "aliases": ["空调状态", "空调开着吗", "车内温度", "车内多少度", "现在空调几度"],
+      "utterances": ["现在车里多少度", "空调开着吗", "看看空调设定温度"],
+      "status_signals": ["hvac.power", "hvac.temperature_c", "hvac.cabin_temperature_c"],
+      "fields": [
+        { "name": "names", "type": "array_string" },
+        { "name": "runtime", "type": "object", "sensitive": true }
+      ]
+    },
+    {
+      "device": "appointment",
+      "tool": "car_appointment_record",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "car_appointment_record",
+      "title": "查询预约记录",
+      "category": "车况查询",
+      "description": "查询已设置的预约备车、预约空调和预约电池预热记录",
+      "aliases": ["预约记录", "查预约", "预约备车记录", "预约空调记录", "预约电池记录"],
+      "utterances": ["查一下我的预约备车记录", "我设了哪些预约空调"],
+      "status_signals": ["appointment.records"],
+      "fields": [
+        { "name": "cmdidList", "type": "array_integer", "required": true, "min_items": 1, "question": "要查询哪类预约记录？" },
+        { "name": "target_date", "type": "string" },
+        { "name": "sub_items", "type": "array_string" },
+        { "name": "deviceKey", "type": "string", "sensitive": true },
+        { "name": "runtime", "type": "object", "sensitive": true }
+      ]
+    },
+    {
+      "device": "charging",
+      "tool": "car_charging_info",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "car_charging_info",
+      "title": "查询充电设置与上限",
+      "category": "车况查询",
+      "description": "查询充电上限 SOC、预约充电开关及预约充电时间",
+      "aliases": ["充电上限", "预约充电状态", "充电设置", "查充电信息"],
+      "utterances": ["我的充电上限设了多少", "看看预约充电开了没"],
+      "status_signals": ["charging.soc_limit", "charging.scheduled_enabled", "charging.scheduled_time"],
+      "fields": [
+        { "name": "deviceKey", "type": "string", "sensitive": true },
+        { "name": "runtime", "type": "object", "sensitive": true }
+      ]
+    },
+    {
+      "device": "permission",
+      "tool": "car_permission_info",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "car_permission_info",
+      "title": "查询车辆权限与停车信息",
+      "category": "车况查询",
+      "description": "查询 GPS 定位权限、AI 停车位和停车照片权限信息",
+      "aliases": ["车辆权限", "GPS权限", "停车照片", "停车位", "定位权限"],
+      "utterances": ["查看车机定位权限", "我的停车照片权限开了吗"],
+      "status_signals": ["permission.gps", "permission.parking_photo"],
+      "fields": [
+        { "name": "deviceKey", "type": "string", "sensitive": true },
+        { "name": "runtime", "type": "object", "sensitive": true }
+      ]
+    },
+    {
+      "device": "vehicle",
+      "tool": "car_signal_status",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "car_signal_status",
+      "title": "查询车辆原始信号",
+      "category": "车况查询",
+      "description": "查询车辆综合信号状态（默认由本地 query_car_status 聚合替代）",
+      "aliases": ["车辆信号", "实时车况", "全车状态"],
+      "utterances": ["查询全车信号状态"],
+      "disabled_by_default": true,
+      "status_signals": ["window.front_left", "window.front_right", "window.rear_left", "window.rear_right", "hvac.power", "hvac.temperature_c"],
+      "fields": [
+        { "name": "deviceKey", "type": "string", "sensitive": true }
+      ]
+    },
+    {
+      "device": "prepare",
+      "tool": "vehicle_prep_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "vehicle_prep_ctrl",
+      "title": "预约备车",
+      "category": "预约备车",
+      "description": "预约出发时间，组合控制空调、座椅加热/通风、方向盘加热、后视镜加热和导航备车",
+      "aliases": ["预约备车", "定时备车", "一键备车", "出发备车", "提前备车"],
+      "utterances": ["帮我预约明天早上8点备车，开空调24度和主驾座椅加热", "预约工作日7点半备车"],
+      "anti_examples": ["查询预约备车", "删除预约备车"],
+      "require_any_of": [["ac", "navi", "seat_setting", "steer_wheel_heat", "rear_mirror_heat", "child_seat_vent"]],
+      "fields": [
+        { "name": "start_time", "type": "string", "required": true, "question": "预约几点备车？" },
+        { "name": "days", "type": "string", "required": true, "question": "预约哪天或哪些日期备车？" },
+        {
+          "name": "ac",
+          "type": "object",
+          "properties": [
+            { "name": "power", "type": "string", "enum": ["on", "off"] },
+            { "name": "temperature", "type": "string", "dynamic_bound": "temperature_c" },
+            { "name": "premode", "type": "string", "enum": ["1", "2", "3", "4", "5", "6", "7", "8"] },
+            { "name": "wind_level", "type": "string" }
+          ]
+        },
+        {
+          "name": "navi",
+          "type": "object",
+          "properties": [
+            { "name": "name", "type": "string" },
+            { "name": "longitude", "type": "string" },
+            { "name": "latitude", "type": "string" },
+            { "name": "address", "type": "string" },
+            { "name": "id", "type": "string" }
+          ]
+        },
+        {
+          "name": "seat_setting",
+          "type": "object",
+          "properties": [
+            { "name": "left_front", "type": "string", "enum": ["3", "13"] },
+            { "name": "right_front", "type": "string", "enum": ["3", "13"] },
+            { "name": "left_rear", "type": "string", "enum": ["3", "13"] },
+            { "name": "right_rear", "type": "string", "enum": ["3", "13"] }
+          ]
+        },
+        {
+          "name": "steer_wheel_heat",
+          "type": "object",
+          "properties": [
+            { "name": "power", "type": "string", "enum": ["on", "off"] }
+          ]
+        },
+        {
+          "name": "rear_mirror_heat",
+          "type": "object",
+          "properties": [
+            { "name": "power", "type": "string", "enum": ["on", "off"] }
+          ]
+        },
+        {
+          "name": "child_seat_vent",
+          "type": "object",
+          "properties": [
+            { "name": "power", "type": "string", "enum": ["on", "off"] },
+            { "name": "mac", "type": "string" }
+          ]
+        }
+      ],
+      "guard": {
+        "device_keywords": ["备车", "预约备车", "出发"],
+        "positive_verbs": ["预约", "备车", "设", "开"]
+      }
+    },
+    {
+      "device": "prepare",
+      "tool": "car_prepare_ctrl",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "car_prepare_ctrl",
+      "title": "立即备车控制",
+      "category": "预约备车",
+      "description": "立即执行组合备车动作（默认在预约备车场景禁用）",
+      "aliases": ["立即备车", "马上备车"],
+      "utterances": ["立即一键备车"],
+      "disabled_by_default": true,
+      "fields": [
+        { "name": "ac_power", "type": "string", "enum": ["on", "off"] },
+        { "name": "ac_temperature", "type": "string", "dynamic_bound": "temperature_c" },
+        { "name": "ac_premode", "type": "string", "enum": ["1", "2", "3", "4", "5"] },
+        { "name": "steer_wheel_heat_power", "type": "string", "enum": ["on", "off"] },
+        { "name": "rear_mirror_heat_power", "type": "string", "enum": ["on", "off"] }
+      ]
+    }
+  ]
+}
