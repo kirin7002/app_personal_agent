@@ -19,6 +19,8 @@ doc/
 | [hermes-vehicle-task-implementation-plan.md](./design/hermes-vehicle-task-implementation-plan.md) | H00–H09 分阶段实施计划与分工 |
 | [vehicle-contract.md](./design/vehicle-contract.md) | H00 共享接口、状态机与车端 WebSocket 协议契约 |
 | [optimization-roadmap.md](./design/optimization-roadmap.md) | 架构优化路线图（P0/P1/P2 优先级、反模式红线与验收指标） |
+| [web-demo-interface-design.md](./design/web-demo-interface-design.md) | Web Demo 前端页面与后端执行过程 SSE 接口设计 |
+| [web-demo-implementation-plan.md](./design/web-demo-implementation-plan.md) | Web Demo 与 SSE 执行过程双 Agent 实施任务拆分（W01–W06） |
 
 ## 2. 模块交付与验证报告（`tasks/`）
 
