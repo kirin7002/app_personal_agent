@@ -686,6 +686,7 @@ type Service struct {
 	mu        sync.RWMutex
 	specs     map[contract.Operation]OperationSpec
 	order     []contract.Operation
+	bm25Cache *precomputedBM25
 	profiles  map[string]VehicleProfile
 	telemetry TelemetryProvider
 	manuals   []ManualEntry
@@ -711,7 +712,11 @@ func NewService(telemetry TelemetryProvider) *Service {
 }
 
 func (s *Service) onCatalogChangedLocked() {
-	// Hook for precomputed retrieval index invalidation (P0-2).
+	all := make([]OperationSpec, 0, len(s.order))
+	for _, op := range s.order {
+		all = append(all, s.specs[op])
+	}
+	s.bm25Cache = buildPrecomputedBM25(all)
 }
 
 func (s *Service) RegisterOperation(spec OperationSpec) {
