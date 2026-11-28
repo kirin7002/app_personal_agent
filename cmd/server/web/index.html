@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal Agent · 车辆助手 DEMO</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2318343f'/%3E%3Ctext x='9' y='24' fill='%23bce0cc' font-size='25'%3Ep%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside class="sidebar" aria-label="导航与系统状态">
+    <a class="brand" href="/">
+      <span class="mark">p<span>•</span></span>
+      <span>personal agent<small>车辆助手 · WEB DEMO</small></span>
+    </a>
+
+    <nav aria-label="主导航">
+      <button type="button" class="nav-item active" id="focusChat">
+        <span class="nav-glyph" aria-hidden="true">◌</span>
+        <span>与 Agent 对话</span>
+      </button>
+      <button type="button" class="nav-item" id="openCatalog" aria-label="能力目录">
+        <span class="nav-glyph" aria-hidden="true">▦</span>
+        <span>能力目录</span>
+        <small id="catalogCount">—</small>
+      </button>
+      <button type="button" class="nav-item" id="openStateModal" aria-label="调试状态 JSON">
+        <span class="nav-glyph" aria-hidden="true">⌘</span>
+        <span>状态快照</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-note">
+      <span class="eyebrow">REALTIME EXECUTION TRACE</span>
+      <p>支持语音与文字输入。<br>通过后端 SSE 实时查看<br>BM25 召回、Hermes 编排、<br>Go MCP 护栏与车辆回执。</p>
+    </div>
+
+    <div class="status-card" aria-label="服务状态">
+      <div><i id="hermesDot"></i><span>Hermes</span><strong id="hermesStatus">检查中</strong></div>
+      <div><i id="voiceDot"></i><span>千问语音</span><strong id="voiceStatus">检查中</strong></div>
+      <div><i id="sseDot"></i><span>过程 SSE</span><strong id="sseStatus">未连接</strong></div>
+      <div><i id="simDot"></i><span>模拟车辆</span><strong id="simStatus">检查中</strong></div>
+    </div>
+
+    <div class="sidebar-foot" id="sidebarFoot">DEMO · 模拟车辆与本地状态库</div>
+  </aside>
+
+  <main class="conversation">
+    <header class="conversation-header">
+      <div class="header-left">
+        <h1>车辆助手</h1>
+        <span id="channelBadge" class="badge">文字入口</span>
+        <span id="vehicleChip" class="vehicle-chip">sim-car</span>
+      </div>
+      <div class="header-right">
+        <span class="task-counter">待办 <b id="pendingCounter">0</b></span>
+        <button type="button" class="secondary vehicle-toggle" id="toggleVehiclePanel" aria-expanded="false">模拟车况</button>
+        <button type="button" class="secondary" id="reconnectBtn" title="重新同步状态并重连 SSE">刷新同步</button>
+        <button type="button" class="secondary" id="clearLocalBtn" title="仅清空当前界面显示，不影响服务端记录">清屏</button>
+      </div>
+    </header>
+
+    <div class="chat" id="chat" role="log" aria-live="polite" aria-label="对话与执行过程时间线">
+      <section class="welcome" id="welcome">
+        <span class="welcome-mark">p<span>•</span></span>
+        <div class="eyebrow">HERMES × QWEN REALTIME × GO MCP</div>
+        <h2>说出或输入需求，<br><span>实时看见每一步执行。</span></h2>
+        <p>覆盖车控追问、车况查询、车书检索与异步回执确认。所有工具调用、Go 写入护栏与耗时均通过后端 SSE 实时呈现。</p>
+        <div class="suggestions" id="suggestions" aria-label="快捷示例指令"></div>
+      </section>
+      <div id="timeline" class="timeline" aria-label="对话记录与执行过程"></div>
+    </div>
+
+    <div class="composer-area">
+      <form id="authBanner" class="auth-banner" hidden>
+        <span>需要 Demo 访问口令以建立安全会话（仅存于 HttpOnly Cookie）：</span>
+        <input id="authTokenInput" type="password" placeholder="输入 DEMO_AUTH_TOKEN（默认 demo-token）" autocomplete="off">
+        <button type="submit" class="primary" id="authSubmitBtn">建立会话</button>
+      </form>
+
+      <div id="pendingBar" class="pending-bar" role="status" hidden>
+        <span class="pending-dot" aria-hidden="true"></span>
+        <span id="pendingBarText" class="pending-bar-text"></span>
+        <span id="pendingBarTimer" class="pending-bar-timer"></span>
+      </div>
+
+      <div id="voiceBar" class="voice-bar" role="status" hidden>
+        <span class="voice-indicator" id="voiceIndicator" aria-hidden="true"></span>
+        <span id="voiceBarText">语音通道已就绪</span>
+        <span id="voiceGenBadge" class="voice-gen"></span>
+        <button type="button" id="stopPlaybackBtn" class="text-button" hidden>停止播报</button>
+      </div>
+
+      <form id="composer" class="composer">
+        <label class="sr-only" for="message">输入车辆指令或问题</label>
+        <textarea id="message" placeholder="输入车辆需求，例如「把车窗关一下」或「打开空调调到24度」…" maxlength="2000" rows="2"></textarea>
+        <div class="compose-actions">
+          <div class="voice-controls">
+            <button type="button" id="voiceConnectBtn" class="voice-button" aria-pressed="false">◉ 连接语音</button>
+            <button type="button" id="pttBtn" class="ptt-button" disabled aria-pressed="false" title="连接语音后按住说话，松开发送（支持空格键或切换点击模式）">按住说话</button>
+            <label class="ptt-mode-toggle" title="切换按住说话或点击开始/结束模式">
+              <input type="checkbox" id="pttClickMode">
+              <span>点击切换</span>
+            </label>
+          </div>
+          <span class="input-hint">Enter 发送 · Shift + Enter 换行</span>
+          <button type="submit" id="sendButton" class="primary">发送 ↗</button>
+        </div>
+      </form>
+
+      <p class="caption" id="connectionHint">执行过程与回执均来自 Go 服务端真实事件；指令下发后仅由车辆回执确认完成。</p>
+    </div>
+  </main>
+
+  <aside class="vehicle-panel" id="vehiclePanel" aria-label="模拟车辆状态与回执控制台">
+    <div class="panel-header">
+      <div>
+        <div class="eyebrow">SIMULATED VEHICLE</div>
+        <h2 id="vehicleModelTitle">EV-SUV-2026</h2>
+      </div>
+      <div class="panel-header-actions">
+        <span id="simModeBadge" class="sim-badge">自动回执</span>
+        <button type="button" class="close-button panel-close" id="closeVehiclePanel" aria-label="关闭模拟车辆面板">×</button>
+      </div>
+    </div>
+
+    <section class="panel-section cabin-card" aria-label="车窗与空调状态">
+      <div class="section-title">
+        <span>实时车况</span>
+        <small id="telemetryUpdatedAt">—</small>
+      </div>
+
+      <div class="car-diagram" aria-label="四窗状态示意图">
+        <div class="window-slot left-front" data-window="front_left">
+          <span class="slot-name">左前窗</span>
+          <strong class="slot-state" id="win-front_left">—</strong>
+        </div>
+        <div class="window-slot right-front" data-window="front_right">
+          <span class="slot-name">右前窗</span>
+          <strong class="slot-state" id="win-front_right">—</strong>
+        </div>
+
+        <svg class="car-svg" viewBox="0 0 120 200" role="img" aria-label="车辆俯视图">
+          <rect x="20" y="12" width="80" height="176" rx="28" fill="#eef3eb" stroke="#b9c8b4" stroke-width="2"/>
+          <path d="M32 46 Q60 34 88 46 L84 68 Q60 62 36 68 Z" fill="#dce6d8" stroke="#9eb299" stroke-width="1.5"/>
+          <path d="M36 140 Q60 146 84 140 L86 160 Q60 168 34 160 Z" fill="#dce6d8" stroke="#9eb299" stroke-width="1.5"/>
+          <rect x="36" y="72" width="48" height="62" rx="10" fill="#f7faf5" stroke="#cdd9c9" stroke-width="1.2"/>
+          <rect id="svg-win-front_left" class="svg-win" x="15" y="54" width="9" height="38" rx="4"/>
+          <rect id="svg-win-front_right" class="svg-win" x="96" y="54" width="9" height="38" rx="4"/>
+          <rect id="svg-win-rear_left" class="svg-win" x="15" y="102" width="9" height="38" rx="4"/>
+          <rect id="svg-win-rear_right" class="svg-win" x="96" y="102" width="9" height="38" rx="4"/>
+        </svg>
+
+        <div class="window-slot left-rear" data-window="rear_left">
+          <span class="slot-name">左后窗</span>
+          <strong class="slot-state" id="win-rear_left">—</strong>
+        </div>
+        <div class="window-slot right-rear" data-window="rear_right">
+          <span class="slot-name">右后窗</span>
+          <strong class="slot-state" id="win-rear_right">—</strong>
+        </div>
+      </div>
+
+      <div class="hvac-strip">
+        <div class="hvac-metric">
+          <span>空调开关</span>
+          <strong id="hvacPowerVal">—</strong>
+        </div>
+        <div class="hvac-metric">
+          <span>目标温度</span>
+          <strong id="hvacTempVal">—</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel-section" aria-label="待回复任务">
+      <div class="section-title">
+        <span>待回复任务</span>
+        <span class="count-pill" id="pendingPanelCount">0</span>
+      </div>
+      <div id="pendingList" class="panel-list">
+        <p class="panel-empty">暂无待补充任务</p>
+      </div>
+    </section>
+
+    <section class="panel-section" aria-label="在途指令与手动回执">
+      <div class="section-title">
+        <span>在途指令</span>
+        <span class="count-pill" id="activeCommandsCount">0</span>
+      </div>
+      <div id="activeCommandsList" class="panel-list">
+        <p class="panel-empty">暂无执行中指令</p>
+      </div>
+    </section>
+
+    <section class="panel-section" aria-label="最近车辆结果事件">
+      <div class="section-title">
+        <span>车辆结果事件</span>
+        <span class="count-pill" id="resultsCount">0</span>
+      </div>
+      <div id="resultsList" class="panel-list">
+        <p class="panel-empty">暂无已完成结果事件</p>
+      </div>
+    </section>
+  </aside>
+
+  <dialog id="catalogDialog" class="drawer" aria-labelledby="catalogTitle">
+    <div class="drawer-header">
+      <div>
+        <div class="eyebrow">CAPABILITY CATALOG</div>
+        <h2 id="catalogTitle">当前车型能力目录</h2>
+      </div>
+      <button type="button" class="close-button" data-close="catalogDialog" aria-label="关闭能力目录">×</button>
+    </div>
+    <p class="drawer-subtitle" id="catalogSummary">加载中…</p>
+    <div id="catalogGrid" class="catalog-grid"></div>
+    <section id="schemaViewer" class="schema-viewer" hidden>
+      <div class="schema-header">
+        <strong id="schemaTitle">参数 Schema</strong>
+        <button type="button" class="text-button" id="copySchemaBtn">复制 JSON</button>
+      </div>
+      <pre><code id="schemaCode"></code></pre>
+    </section>
+  </dialog>
+
+  <dialog id="stateDialog" class="drawer" aria-labelledby="stateTitle">
+    <div class="drawer-header">
+      <div>
+        <div class="eyebrow">LIVE STATE SNAPSHOT</div>
+        <h2 id="stateTitle">服务端状态快照（/api/state）</h2>
+      </div>
+      <button type="button" class="close-button" data-close="stateDialog" aria-label="关闭状态快照">×</button>
+    </div>
+    <div class="drawer-toolbar">
+      <span class="drawer-subtitle" id="stateCursorLabel">cursor: 0</span>
+      <div class="drawer-toolbar-actions">
+        <button type="button" class="secondary" id="refreshStateJsonBtn">重新拉取</button>
+        <button type="button" class="text-button" id="copyStateJsonBtn">复制 JSON</button>
+      </div>
+    </div>
+    <pre class="json-pre"><code id="stateJsonCode">{}</code></pre>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
