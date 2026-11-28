@@ -578,7 +578,7 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 		t.Fatal(err)
 	}
 	capResp.Body.Close()
-	if capResp.StatusCode != http.StatusOK || capData.VehicleID != "sim-car" || len(capData.Capabilities) != 6 {
+	if capResp.StatusCode != http.StatusOK || capData.VehicleID != "sim-car" || len(capData.Capabilities) != 7 {
 		t.Fatalf("unexpected /api/capabilities: status=%d data=%+v", capResp.StatusCode, capData)
 	}
 
@@ -650,10 +650,11 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 		t.Fatal(err)
 	}
 	var state1 struct {
-		Cursor         uint64              `json:"cursor"`
-		ActiveCommands []activeCommandView `json:"active_commands"`
-		Messages       []json.RawMessage   `json:"messages"`
-		ProcessSteps   []json.RawMessage   `json:"process_steps"`
+		Cursor         uint64                `json:"cursor"`
+		ActiveCommands []activeCommandView   `json:"active_commands"`
+		RecentTasks    []contract.TaskResult `json:"recent_tasks"`
+		Messages       []json.RawMessage     `json:"messages"`
+		ProcessSteps   []json.RawMessage     `json:"process_steps"`
 	}
 	if err := json.NewDecoder(stateResp.Body).Decode(&state1); err != nil {
 		stateResp.Body.Close()
@@ -663,6 +664,13 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 	if state1.Cursor == 0 || len(state1.ActiveCommands) != 1 || state1.ActiveCommands[0].CommandID != r2.CommandID || len(state1.Messages) < 4 || len(state1.ProcessSteps) < 4 {
 		t.Fatalf("unexpected /api/state before receipt: cursor=%d active=%+v msgs=%d steps=%d",
 			state1.Cursor, state1.ActiveCommands, len(state1.Messages), len(state1.ProcessSteps))
+	}
+
+	if len(state1.RecentTasks) != 1 || state1.RecentTasks[0].TaskID != r2.TaskID ||
+		state1.RecentTasks[0].Status != contract.Executing || state1.RecentTasks[0].Operation == nil ||
+		*state1.RecentTasks[0].Operation != (contract.Operation{Device: "window", Tool: "close"}) ||
+		state1.RecentTasks[0].CreatedAt == nil {
+		t.Fatalf("recent tasks should include the executing command: %+v", state1.RecentTasks)
 	}
 
 	// 9. POST /debug/receipt via Cookie completes the command and updates telemetry.
@@ -676,7 +684,12 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 		t.Fatalf("Cookie POST /debug/receipt status=%d", recResp.StatusCode)
 	}
 
-	// 10. GET /api/state reflects closed window, empty active_commands, and 1 completed vehicle_result.
+	r3 := postCookieUtterance("cookie-r3", "把车窗关一下")
+	if r3.Status != contract.PendingReply || r3.TaskID == r2.TaskID {
+		t.Fatalf("expected a new task waiting for input: %+v", r3)
+	}
+
+	// 10. GET /api/state includes the new pending task and the previous completion.
 	stateResp2, err := browser.Get(pubSrv.URL + "/api/state")
 	if err != nil {
 		t.Fatal(err)
@@ -687,6 +700,7 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 		} `json:"telemetry"`
 		ActiveCommands []activeCommandView           `json:"active_commands"`
 		VehicleResults []contract.VehicleResultEvent `json:"vehicle_results"`
+		RecentTasks    []contract.TaskResult         `json:"recent_tasks"`
 	}
 	if err := json.NewDecoder(stateResp2.Body).Decode(&state2); err != nil {
 		stateResp2.Body.Close()
@@ -695,6 +709,11 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 	stateResp2.Body.Close()
 	if state2.Telemetry["window.rear_left"].Value != "closed" || len(state2.ActiveCommands) != 0 || len(state2.VehicleResults) != 1 || state2.VehicleResults[0].Status != contract.Completed {
 		t.Fatalf("unexpected /api/state after receipt: %+v", state2)
+	}
+	if len(state2.RecentTasks) != 2 ||
+		state2.RecentTasks[0].TaskID != r3.TaskID || state2.RecentTasks[0].Status != contract.PendingReply ||
+		state2.RecentTasks[1].TaskID != r2.TaskID || state2.RecentTasks[1].Status != contract.Completed {
+		t.Fatalf("expected latest pending followed by completed: %+v", state2.RecentTasks)
 	}
 	sseCancel()
 }

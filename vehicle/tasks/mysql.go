@@ -540,7 +540,7 @@ func (s *MySQLStore) ListTasks(ctx context.Context, scope contract.Scope, input 
 	}
 
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT task_id, COALESCE(command_id, ''), status, missing_fields_json, question, expires_at
+		SELECT task_id, COALESCE(command_id, ''), status, missing_fields_json, question, expires_at, device, tool, created_at
 		FROM vehicle_tasks
 		WHERE scope_key = ?
 		ORDER BY created_at DESC, task_id DESC
@@ -558,8 +558,10 @@ func (s *MySQLStore) ListTasks(ctx context.Context, scope contract.Scope, input 
 			taskID, cmdID, rawStatus, question string
 			missingJSON                        []byte
 			expiresAt                          sql.NullTime
+			operation                          contract.Operation
+			createdAt                          time.Time
 		)
-		if err := rows.Scan(&taskID, &cmdID, &rawStatus, &missingJSON, &question, &expiresAt); err != nil {
+		if err := rows.Scan(&taskID, &cmdID, &rawStatus, &missingJSON, &question, &expiresAt, &operation.Device, &operation.Tool, &createdAt); err != nil {
 			return contract.ListTasksResult{}, err
 		}
 		st := contract.Status(rawStatus)
@@ -576,6 +578,7 @@ func (s *MySQLStore) ListTasks(ctx context.Context, scope contract.Scope, input 
 			t := expiresAt.Time.UTC()
 			expPtr = &t
 		}
+		createdAt = createdAt.UTC()
 		filtered = append(filtered, contract.TaskResult{
 			TaskID:        taskID,
 			CommandID:     cmdID,
@@ -583,6 +586,8 @@ func (s *MySQLStore) ListTasks(ctx context.Context, scope contract.Scope, input 
 			MissingFields: missing,
 			Question:      question,
 			ExpiresAt:     expPtr,
+			Operation:     &operation,
+			CreatedAt:     &createdAt,
 		})
 	}
 	if err := rows.Err(); err != nil {

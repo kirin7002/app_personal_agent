@@ -641,6 +641,9 @@ func vehicleResultText(result contract.VehicleResultEvent) string {
 		if result.Device == "window" && result.Tool == "close" {
 			return "车窗已关闭。"
 		}
+		if result.Device == "hvac" && result.Tool == "set_power" {
+			return "空调开关已调整。"
+		}
 		return "车辆已确认执行完成。"
 	case contract.Failed:
 		return "车辆未能执行这条指令。"

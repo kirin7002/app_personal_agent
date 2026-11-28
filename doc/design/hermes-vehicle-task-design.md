@@ -171,6 +171,7 @@ Go 收到 `session.created` 后发送如下会话配置，等待 `session.update
 | Device | Tool | 参数 Schema 约束 | MCP 入口 |
 | --- | --- | --- | --- |
 | `hvac` | `set_temperature` | `temperature_c` 必填，温度范围按车型配置 | `dispatch_vehicle_command` |
+| `hvac` | `set_power` | 只提交 `power=on/off`，保留车辆原设温 | `dispatch_vehicle_command` |
 | `hvac` | `set_climate` | `power` 和 `temperature_c` 必填，可一次提交开启与设温 | `dispatch_vehicle_command` |
 | `window` | `close` | `position` 必填，枚举为左前、右前、左后、右后 | `dispatch_vehicle_command` |
 | `window` | `get_status` | `positions` 必填，可一次传入多个车窗位置 | `get_vehicle_status` |

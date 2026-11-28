@@ -1178,6 +1178,11 @@ h1 {
   gap: 6px;
 }
 
+#recentTasksList .turn-status {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .panel-card-head strong {
   font-size: 11px;
   color: #2f4a3c;

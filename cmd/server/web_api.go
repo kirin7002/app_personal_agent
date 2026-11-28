@@ -159,6 +159,18 @@ func (a *demoApp) handleAPIState(w http.ResponseWriter, r *http.Request) {
 		pending = []contract.PendingCandidate{}
 	}
 
+	recent, err := a.taskStore.ListTasks(r.Context(), scope, contract.ListTasksInput{
+		Status: []contract.Status{
+			contract.PendingReply, contract.PendingDispatch, contract.Executing, contract.Completed,
+			contract.Expired, contract.Failed, contract.ResultUnknown,
+		},
+	}, now)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	recentTasks := recent.Tasks[:min(len(recent.Tasks), 6)]
+
 	results, err := a.taskStore.ListVehicleResults(r.Context(), scope, now.Add(-contract.ResultRetention))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -205,6 +217,7 @@ func (a *demoApp) handleAPIState(w http.ResponseWriter, r *http.Request) {
 		"scope":           scope,
 		"telemetry":       signals,
 		"pending_tasks":   pending,
+		"recent_tasks":    recentTasks,
 		"active_commands": activeCommands,
 		"vehicle_results": results,
 		"messages":        messages,

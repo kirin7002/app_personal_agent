@@ -149,7 +149,7 @@ sequenceDiagram
 | **会话与配置** | `POST /api/session` | JSON | Demo / Bearer | 新增 | 建立/续期浏览器会话，签发 `HttpOnly` Cookie，返回 `session_id`、`vehicle_id`、`user_id` |
 | **会话与配置** | `GET /api/config` | JSON | Cookie / Bearer | 新增 | 返回系统就绪状态（Hermes 健康、语音开关、TTS 模式、模拟车辆模式、当前车型、快捷示例） |
 | **能力目录** | `GET /api/capabilities` | JSON | Cookie / Bearer | 新增 | 返回当前车型启用的能力目录与参数 Schema（供左侧「能力目录」抽屉与 Schema 预览） |
-| **状态快照** | `GET /api/state` | JSON | Cookie / Bearer | 新增 | 首屏加载与断线重连兜底快照：车况遥测、待回复任务、历史结果、近期消息与过程步骤、`cursor` |
+| **状态快照** | `GET /api/state` | JSON | Cookie / Bearer | 新增 | 首屏加载与断线重连兜底快照：车况遥测、待回复任务、最近 6 条任务状态、历史结果、近期消息与过程步骤、`cursor` |
 | **执行过程 SSE** | `GET /api/events/stream` | **SSE** | Cookie / Bearer | **新增（核心）** | 会话级实时事件流：推送 `process.step`、`message.upsert`、`telemetry.updated`、`vehicle.result`、`ping` |
 | **文字对话 SSE** | `POST /voice/utterances` | **SSE** | Cookie / Bearer | **增强（兼容）** | 提交文字指令；执行期间流式推送 `process.step`，终态推送权威 `speech.reply` |
 | **语音 WebSocket** | `GET /voice/audio` | **WebSocket** | Cookie / Bearer | **复用既有** | 车端 PTT 实时语音通道（16 kHz 上行 / 24 kHz 下行 PCM16LE） |
@@ -422,6 +422,16 @@ Accept: text/event-stream
       "tool": "close",
       "known_params": {},
       "missing_fields": ["position"],
+      "question": "要关哪扇车窗？",
+      "created_at": "2026-11-28T09:45:12Z",
+      "expires_at": "2026-11-28T09:55:12Z"
+    }
+  ],
+  "recent_tasks": [
+    {
+      "task_id": "T136475624C00E4EB",
+      "operation": { "device": "window", "tool": "close" },
+      "status": "pending_reply",
       "question": "要关哪扇车窗？",
       "created_at": "2026-11-28T09:45:12Z",
       "expires_at": "2026-11-28T09:55:12Z"

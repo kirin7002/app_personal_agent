@@ -572,6 +572,8 @@ func (m *MemoryStore) ListTasks(_ context.Context, scope contract.Scope, input c
 			MissingFields: t.MissingFields,
 			Question:      t.Question,
 			ExpiresAt:     exp,
+			Operation:     &t.Operation,
+			CreatedAt:     &t.CreatedAt,
 		})
 	}
 	nextCursor := ""

@@ -234,8 +234,8 @@ func TestListCapabilitiesReadOnlyExport(t *testing.T) {
 	})
 
 	caps := svc.ListCapabilities("VCL_TRIM")
-	if len(caps) != 5 {
-		t.Fatalf("expected 5 enabled capabilities (6 default minus 1 disabled), got %d", len(caps))
+	if len(caps) != 6 {
+		t.Fatalf("expected 6 enabled capabilities (7 default minus 1 disabled), got %d", len(caps))
 	}
 	var foundTemp bool
 	for _, c := range caps {

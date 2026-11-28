@@ -594,6 +594,8 @@ func FeedbackText(ev contract.VehicleResultEvent) string {
 			return "车窗已关闭。"
 		case contract.Operation{Device: "window", Tool: "open"}:
 			return "车窗已打开。"
+		case contract.Operation{Device: "hvac", Tool: "set_power"}:
+			return "空调开关已调整。"
 		case contract.Operation{Device: "hvac", Tool: "set_climate"}, contract.Operation{Device: "hvac", Tool: "set_temperature"}:
 			return "空调已调整完成。"
 		default:
