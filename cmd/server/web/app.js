@@ -1243,6 +1243,44 @@ function renderStateSnapshotDialog() {
 
 // ===== Voice Integration (Lazy Bridge to W06 ./voice-client.js) =====
 
+const SILENT_UNLOCK_WAV =
+  'data:audio/wav;base64,UklGRkYAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YSIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+function prepareGestureUnlockedPlayback() {
+  let playbackCtx = null;
+  let audioEl = null;
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
+  } catch {}
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      playbackCtx = new AudioCtx();
+      playbackCtx.resume?.().catch(() => {});
+    }
+  } catch {}
+  try {
+    audioEl = document.createElement('audio');
+    audioEl.preload = 'auto';
+    audioEl.playsInline = true;
+    audioEl.muted = false;
+    audioEl.volume = 1.0;
+    audioEl.style.display = 'none';
+    document.body.appendChild(audioEl);
+    audioEl.src = SILENT_UNLOCK_WAV;
+    const p = audioEl.play?.();
+    if (p && typeof p.then === 'function') {
+      p.then(() => {
+        audioEl.dataset.unlocked = '1';
+        audioEl.pause();
+      }).catch(() => {});
+    } else {
+      audioEl.dataset.unlocked = '1';
+    }
+  } catch {}
+  return { playbackCtx, audioEl };
+}
+
 async function toggleVoiceConnection() {
   if (state.voiceClient) {
     state.voiceClient.disconnect();
@@ -1258,6 +1296,10 @@ async function toggleVoiceConnection() {
     toast('会话尚未就绪');
     return;
   }
+
+  // Unlock Safari/WebKit audio playback synchronously inside the click gesture before any await.
+  const unlocked = prepareGestureUnlockedPlayback();
+
   $('voiceConnectBtn').disabled = true;
   $('voiceConnectBtn').textContent = '◉ 连接中…';
   setStatusDot('voiceDot', 'voiceStatus', 'warn', '连接中');
@@ -1270,6 +1312,8 @@ async function toggleVoiceConnection() {
     const client = new mod.VehicleVoiceClient({
       sessionId: state.session.session_id,
       vehicleId: state.session.vehicle_id,
+      playbackCtx: unlocked.playbackCtx,
+      audioEl: unlocked.audioEl,
       onStateChange: (vState) => updateVoiceUI(vState),
       onReply: (reply) => applySpeechReply(reply, 'voice'),
       onResult: (result) => applyVehicleResult(result),
@@ -1278,6 +1322,8 @@ async function toggleVoiceConnection() {
     state.voiceClient = client;
     await client.connect();
   } catch (err) {
+    try { unlocked.playbackCtx?.close?.(); } catch {}
+    try { unlocked.audioEl?.remove?.(); } catch {}
     state.voiceClient = null;
     updateVoiceUI({ connected: false, recording: false, playing: false, generation: 0 });
     toast(err.message || '连接语音通道失败');
@@ -1366,6 +1412,16 @@ function wireEvents() {
   });
 
   $('voiceConnectBtn').addEventListener('click', toggleVoiceConnection);
+
+  $('testAudioBtn').addEventListener('click', async () => {
+    if (!state.voiceClient) return;
+    try {
+      const info = await state.voiceClient.playTestTone();
+      toast(`测试提示音已播报（${info.mode}）`);
+    } catch (err) {
+      toast(`测试播报失败：${err.message || err}`);
+    }
+  });
 
   $('stopPlaybackBtn').addEventListener('click', () => {
     state.voiceClient?.stopPlayback?.();
