@@ -452,7 +452,7 @@ func (s *Server) callWriteTool(
 	_, progErr := s.cfg.Tasks.ReadTurnProgress(ctx, turn.Scope, turn.RequestID)
 	alreadyWrote := progErr == nil
 	if !alreadyWrote {
-		if err := evaluateWriteIntent(ctx, s.cfg.Tasks, turn, mut, isDispatch); err != nil {
+		if err := evaluateWriteIntent(ctx, s.cfg.Catalog, s.cfg.Tasks, turn, mut, isDispatch); err != nil {
 			return errorResult(err)
 		}
 	}
