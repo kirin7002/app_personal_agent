@@ -2,12 +2,24 @@
 // app_personal_agent's GET /voice/audio contract (contract/audio.go):
 //   - Uplink : 16 kHz mono PCM16LE (session.open -> speech.started -> audio.input -> speech.ended)
 //   - Downlink: 24 kHz mono PCM16LE (playback.start -> audio.output -> playback.stop -> playback.ack)
+//   - Safari/WebKit compatibility:
+//       * Separate capture AudioContext from playback so getUserMedia(echoCancellation)
+//         does not silence speaker output.
+//       * Prefer native HTML5 <audio> WAV Blob playback for complete TTS clips (reply-*/result-*),
+//         and automatically stream via a dedicated native-sample-rate playback AudioContext
+//         for long-running S2S streams (chat-*/qwen TTS).
 //   - Barge-in: starting a new turn stops local playback immediately without cancelling
 //     already-committed vehicle commands; result-* playback IDs are deduplicated locally.
 
 const MAX_TURN_AUDIO_BYTES = 16000 * 2 * 30; // 30 seconds max per turn (gateway limit)
 const TARGET_CHUNK_BYTES = 1920; // 60 ms at 16 kHz PCM16LE (even, <= 64 KiB)
 const HANDSHAKE_TIMEOUT_MS = 10000;
+const WAV_COALESCE_MS = 180; // Wait briefly for playback.stop before switching to live WebAudio streaming
+const OUTPUT_SAMPLE_RATE = 24000;
+
+// Tiny 1 ms silent 24 kHz mono WAV used to unlock Safari <audio> playback inside a user gesture.
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRkYAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YSIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
 export function bytesToBase64(bytes) {
   let binary = '';
@@ -27,11 +39,98 @@ export function base64ToBytes(encoded) {
   return out;
 }
 
+export function encodeWav24kMono(chunks) {
+  const list = Array.isArray(chunks) ? chunks : [chunks];
+  let totalBytes = 0;
+  for (const c of list) {
+    if (c && c.byteLength) totalBytes += c.byteLength;
+  }
+  const dataLen = totalBytes - (totalBytes % 2);
+  const wav = new Uint8Array(44 + dataLen);
+  const view = new DataView(wav.buffer);
+
+  // RIFF header
+  wav.set([0x52, 0x49, 0x46, 0x46], 0); // "RIFF"
+  view.setUint32(4, 36 + dataLen, true);
+  wav.set([0x57, 0x41, 0x56, 0x45], 8); // "WAVE"
+
+  // fmt chunk: PCM, mono, 24000 Hz, 16-bit
+  wav.set([0x66, 0x6d, 0x74, 0x20], 12); // "fmt "
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, OUTPUT_SAMPLE_RATE, true);
+  view.setUint32(28, OUTPUT_SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+
+  // data chunk
+  wav.set([0x64, 0x61, 0x74, 0x61], 36); // "data"
+  view.setUint32(40, dataLen, true);
+
+  let offset = 44;
+  let remaining = dataLen;
+  for (const c of list) {
+    if (!c || !c.byteLength || remaining <= 0) continue;
+    const take = Math.min(c.byteLength, remaining);
+    wav.set(c.subarray(0, take), offset);
+    offset += take;
+    remaining -= take;
+  }
+  return wav;
+}
+
+export function resample24kToRate(pcmBytes, targetSampleRate) {
+  const inCount = Math.floor((pcmBytes?.byteLength || 0) / 2);
+  if (inCount <= 0) return new Float32Array(0);
+  const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, inCount * 2);
+  const rate = Number(targetSampleRate) || OUTPUT_SAMPLE_RATE;
+
+  if (rate === OUTPUT_SAMPLE_RATE) {
+    const out = new Float32Array(inCount);
+    for (let i = 0; i < inCount; i++) {
+      out[i] = view.getInt16(i * 2, true) / 32768;
+    }
+    return out;
+  }
+
+  const outCount = Math.max(1, Math.round((inCount * rate) / OUTPUT_SAMPLE_RATE));
+  const out = new Float32Array(outCount);
+  const step = OUTPUT_SAMPLE_RATE / rate;
+  for (let i = 0; i < outCount; i++) {
+    const pos = i * step;
+    const idx = Math.floor(pos);
+    const frac = pos - idx;
+    const s0 = view.getInt16(Math.min(idx, inCount - 1) * 2, true) / 32768;
+    const s1 = view.getInt16(Math.min(idx + 1, inCount - 1) * 2, true) / 32768;
+    out[i] = s0 + (s1 - s0) * frac;
+  }
+  return out;
+}
+
+export function createTestChimePCM24k() {
+  const sampleRate = OUTPUT_SAMPLE_RATE;
+  const totalSamples = Math.floor(sampleRate * 0.36);
+  const pcm = new Uint8Array(totalSamples * 2);
+  const view = new DataView(pcm.buffer);
+  for (let i = 0; i < totalSamples; i++) {
+    const t = i / sampleRate;
+    const freq = t < 0.16 ? 523.25 : 659.25; // C5 -> E5 pleasant chime
+    const env = Math.min(1, t / 0.015) * Math.min(1, (0.36 - t) / 0.06);
+    const sample = Math.round(Math.sin(2 * Math.PI * freq * t) * 11000 * Math.max(0, env));
+    view.setInt16(i * 2, sample, true);
+  }
+  return pcm;
+}
+
 export class VehicleVoiceClient {
   constructor({
     sessionId,
     vehicleId,
     wsUrl = '',
+    playbackCtx = null,
+    audioEl = null,
+    wavCoalesceMs = WAV_COALESCE_MS,
     onStateChange = () => {},
     onReply = () => {},
     onResult = () => {},
@@ -40,17 +139,28 @@ export class VehicleVoiceClient {
     this.sessionId = sessionId;
     this.vehicleId = vehicleId;
     this.wsUrl = wsUrl;
+    this.wavCoalesceMs = wavCoalesceMs;
     this.onStateChange = onStateChange;
     this.onReply = onReply;
     this.onResult = onResult;
     this.onError = onError;
 
     this.socket = null;
-    this.audioCtx = null;
+
+    // Separate capture pipeline from playback pipeline to avoid Safari/WebKit AEC muting.
+    this.captureCtx = null;
     this.mediaStream = null;
     this.micSource = null;
     this.workletNode = null;
     this.muteGain = null;
+
+    // Playback pipeline (native <audio> WAV Blob primary + dedicated playbackCtx streaming fallback).
+    this.playbackCtx = playbackCtx;
+    this.playbackGain = null;
+    this.audioEl = audioEl;
+    this.audioElUnlocked = Boolean(audioEl?.dataset?.unlocked === '1');
+    this.activeAudioUrl = '';
+    this.activeAudioPlayback = null;
 
     this.connected = false;
     this.closed = false;
@@ -68,8 +178,12 @@ export class VehicleVoiceClient {
     this.activeSources = new Set();
     this.nextPlayTime = 0;
     this.playing = false;
-    this.currentPlayback = null; // { id, generation, expectedSeq, skip, stopReceived, reason }
+    this.currentPlayback = null;
     this.consumedResultPlaybacks = new Set();
+  }
+
+  get audioCtx() {
+    return this.playbackCtx || this.captureCtx;
   }
 
   emitState(extra = {}) {
@@ -90,6 +204,74 @@ export class VehicleVoiceClient {
     return false;
   }
 
+  configureAudioSession() {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.audioSession) {
+        navigator.audioSession.type = 'play-and-record';
+      }
+    } catch {}
+  }
+
+  ensurePlaybackOutput() {
+    if (typeof window !== 'undefined') {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!this.playbackCtx && AudioCtx) {
+        this.playbackCtx = new AudioCtx();
+      }
+      if (this.playbackCtx && !this.playbackGain && typeof this.playbackCtx.createGain === 'function') {
+        this.playbackGain = this.playbackCtx.createGain();
+        this.playbackGain.gain.value = 1.0;
+        this.playbackGain.connect(this.playbackCtx.destination);
+      }
+    }
+    if (!this.audioEl && typeof document !== 'undefined') {
+      const el = document.createElement('audio');
+      el.preload = 'auto';
+      el.playsInline = true;
+      el.muted = false;
+      el.volume = 1.0;
+      el.style.display = 'none';
+      document.body?.appendChild(el);
+      this.audioEl = el;
+      this.ownsAudioEl = true;
+    }
+  }
+
+  unlockPlayback() {
+    this.configureAudioSession();
+    this.ensurePlaybackOutput();
+    if (this.playbackCtx && this.playbackCtx.state === 'suspended') {
+      this.playbackCtx.resume?.().catch(() => {});
+    }
+    if (this.audioEl && !this.audioElUnlocked && !this.playing) {
+      try {
+        this.audioEl.muted = false;
+        this.audioEl.volume = 1.0;
+        this.audioEl.src = SILENT_WAV_DATA_URI;
+        const p = this.audioEl.play?.();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            this.audioElUnlocked = true;
+            if (!this.activeAudioPlayback) {
+              this.audioEl?.pause?.();
+            }
+          }).catch(() => {});
+        } else {
+          this.audioElUnlocked = true;
+        }
+      } catch {}
+    }
+  }
+
+  setMicEnabled(enabled) {
+    if (!this.mediaStream) return;
+    try {
+      for (const track of this.mediaStream.getAudioTracks()) {
+        track.enabled = Boolean(enabled);
+      }
+    } catch {}
+  }
+
   async connect() {
     if (this.closed) throw new Error('voice client already closed');
     if (this.connected) return;
@@ -104,8 +286,10 @@ export class VehicleVoiceClient {
     }
 
     try {
-      this.audioCtx = new AudioCtx();
-      await this.audioCtx.resume();
+      this.unlockPlayback();
+
+      this.captureCtx = new AudioCtx();
+      await this.captureCtx.resume();
       if (this.closed) return;
 
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -122,19 +306,28 @@ export class VehicleVoiceClient {
         return;
       }
 
-      await this.audioCtx.audioWorklet.addModule('/static/pcm-worklet.js');
+      // Safari may suspend AudioContexts when getUserMedia switches CoreAudio session category.
+      if (this.captureCtx.state !== 'running') {
+        await this.captureCtx.resume().catch(() => {});
+      }
+      if (this.playbackCtx && this.playbackCtx.state !== 'running') {
+        await this.playbackCtx.resume().catch(() => {});
+      }
+
+      await this.captureCtx.audioWorklet.addModule('/static/pcm-worklet.js');
       if (this.closed) {
         this.cleanupMedia();
         return;
       }
 
-      this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-capture');
-      this.micSource = this.audioCtx.createMediaStreamSource(this.mediaStream);
-      this.muteGain = this.audioCtx.createGain();
+      this.workletNode = new AudioWorkletNode(this.captureCtx, 'pcm-capture');
+      this.micSource = this.captureCtx.createMediaStreamSource(this.mediaStream);
+      this.muteGain = this.captureCtx.createGain();
       this.muteGain.gain.value = 0;
       this.micSource.connect(this.workletNode);
       this.workletNode.connect(this.muteGain);
-      this.muteGain.connect(this.audioCtx.destination);
+      this.muteGain.connect(this.captureCtx.destination);
+      this.setMicEnabled(false);
 
       this.workletNode.port.onmessage = (event) => {
         if (!this.recording || !this.connected || this.closed) return;
@@ -205,6 +398,7 @@ export class VehicleVoiceClient {
         } else if (!this.closed) {
           this.connected = false;
           this.recording = false;
+          this.setMicEnabled(false);
           this.stopPlayback();
           this.emitState({ reason: 'disconnected' });
         }
@@ -218,7 +412,7 @@ export class VehicleVoiceClient {
     switch (frame.type) {
       case 'session.ready': {
         const fmt = frame.output_format;
-        if (!fmt || fmt.encoding !== 'pcm_s16le' || fmt.sample_rate !== 24000 || fmt.channels !== 1) {
+        if (!fmt || fmt.encoding !== 'pcm_s16le' || fmt.sample_rate !== OUTPUT_SAMPLE_RATE || fmt.channels !== 1) {
           const err = new Error('服务端返回了不支持的输出音频格式');
           onReadySettled?.(err);
           this.onError(err);
@@ -258,10 +452,11 @@ export class VehicleVoiceClient {
       }
 
       case 'playback.start': {
+        this.stopPlayback();
         const id = frame.playback_id || '';
         const gen = Number(frame.playback_generation) || 0;
         const skip = id.startsWith('result-') && this.consumedResultPlaybacks.has(id);
-        this.currentPlayback = {
+        const pb = {
           id,
           generation: gen,
           expectedSeq: 1,
@@ -269,7 +464,15 @@ export class VehicleVoiceClient {
           stopReceived: false,
           reason: '',
           receivedAudio: false,
+          mode: this.canUseAudioElement() ? 'buffering' : 'stream',
+          chunks: [],
+          streamTimer: null,
+          acked: false,
         };
+        this.currentPlayback = pb;
+        if (!skip && pb.mode === 'buffering' && this.wavCoalesceMs > 0) {
+          pb.streamTimer = setTimeout(() => this.switchPlaybackToStream(pb), this.wavCoalesceMs);
+        }
         break;
       }
 
@@ -283,8 +486,15 @@ export class VehicleVoiceClient {
         }
         pb.expectedSeq++;
         pb.receivedAudio = true;
-        if (!pb.skip && frame.audio) {
-          this.enqueue24kPCM(frame.audio, pb);
+        if (pb.skip || !frame.audio) return;
+
+        const pcmBytes = base64ToBytes(frame.audio);
+        if (pcmBytes.length < 2) return;
+
+        if (pb.mode === 'buffering') {
+          pb.chunks.push(pcmBytes);
+        } else if (pb.mode === 'stream') {
+          this.enqueue24kPCMBytes(pcmBytes, pb);
         }
         break;
       }
@@ -294,15 +504,30 @@ export class VehicleVoiceClient {
         if (!pb || frame.playback_id !== pb.id || Number(frame.playback_generation) !== pb.generation) {
           return;
         }
+        if (pb.streamTimer) {
+          clearTimeout(pb.streamTimer);
+          pb.streamTimer = null;
+        }
         pb.stopReceived = true;
         pb.reason = frame.reason || '';
-        if (pb.reason === 'completed') {
-          if (pb.skip || this.activeSources.size === 0) {
-            this.ackPlayback(pb);
-          }
-        } else {
+        if (pb.reason !== 'completed') {
           this.stopPlayback();
           this.currentPlayback = null;
+          return;
+        }
+        if (pb.skip) {
+          this.ackPlayback(pb);
+          return;
+        }
+        if (pb.mode === 'buffering') {
+          if (pb.chunks.length === 0) {
+            this.ackPlayback(pb);
+            return;
+          }
+          pb.mode = 'element';
+          this.playBufferedWav(pb);
+        } else if (pb.mode === 'stream' && this.activeSources.size === 0) {
+          this.ackPlayback(pb);
         }
         break;
       }
@@ -312,12 +537,165 @@ export class VehicleVoiceClient {
     }
   }
 
+  canUseAudioElement() {
+    return Boolean(
+      this.audioEl &&
+      typeof Blob !== 'undefined' &&
+      typeof URL !== 'undefined' &&
+      typeof URL.createObjectURL === 'function'
+    );
+  }
+
+  switchPlaybackToStream(pb) {
+    if (this.closed || this.currentPlayback !== pb || pb.mode !== 'buffering' || pb.stopReceived) {
+      return;
+    }
+    pb.streamTimer = null;
+    pb.mode = 'stream';
+    const buffered = pb.chunks;
+    pb.chunks = [];
+    for (const chunk of buffered) {
+      this.enqueue24kPCMBytes(chunk, pb);
+    }
+  }
+
+  playBufferedWav(pb) {
+    if (this.closed || this.currentPlayback !== pb) return;
+    if (!this.canUseAudioElement()) {
+      this.playChunksViaWebAudio(pb);
+      return;
+    }
+
+    const chunks = pb.chunks;
+    pb.chunks = [];
+    const wavBytes = encodeWav24kMono(chunks);
+    const blob = new Blob([wavBytes], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+
+    this.revokeActiveAudioUrl();
+    this.activeAudioUrl = url;
+    this.activeAudioPlayback = pb;
+    this.playing = true;
+    this.emitState({ playbackMode: 'audio-element' });
+
+    const el = this.audioEl;
+    el.muted = false;
+    el.volume = 1.0;
+
+    const finishElement = () => {
+      if (this.activeAudioPlayback !== pb) return;
+      el.onended = null;
+      el.onerror = null;
+      this.activeAudioPlayback = null;
+      this.revokeActiveAudioUrl();
+      this.playing = false;
+      this.ackPlayback(pb);
+      this.emitState();
+    };
+
+    const fallbackToWebAudio = () => {
+      if (this.activeAudioPlayback !== pb) return;
+      el.onended = null;
+      el.onerror = null;
+      try { el.pause(); } catch {}
+      this.activeAudioPlayback = null;
+      this.revokeActiveAudioUrl();
+      pb.chunks = chunks;
+      pb.mode = 'stream';
+      this.playChunksViaWebAudio(pb);
+    };
+
+    el.onended = finishElement;
+    el.onerror = fallbackToWebAudio;
+    el.src = url;
+    try { el.currentTime = 0; } catch {}
+
+    try {
+      const p = el.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => fallbackToWebAudio());
+      }
+    } catch {
+      fallbackToWebAudio();
+    }
+  }
+
+  playChunksViaWebAudio(pb) {
+    const chunks = pb.chunks || [];
+    pb.chunks = [];
+    pb.mode = 'stream';
+    if (!this.playbackCtx || chunks.length === 0) {
+      this.playing = false;
+      if (chunks.length > 0) {
+        this.onError(new Error('浏览器未允许音频播放，请点击界面任意按钮或「测试声音」解除静音限制'));
+      }
+      this.ackPlayback(pb);
+      this.emitState();
+      return;
+    }
+    for (const chunk of chunks) {
+      this.enqueue24kPCMBytes(chunk, pb);
+    }
+  }
+
+  revokeActiveAudioUrl() {
+    if (this.activeAudioUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      try {
+        URL.revokeObjectURL(this.activeAudioUrl);
+      } catch {}
+    }
+    this.activeAudioUrl = '';
+  }
+
+  async playTestTone() {
+    this.unlockPlayback();
+    const pcm = createTestChimePCM24k();
+
+    if (this.canUseAudioElement()) {
+      const wav = encodeWav24kMono([pcm]);
+      const url = URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
+      const el = this.audioEl;
+      this.stopPlayback();
+      this.activeAudioUrl = url;
+      el.muted = false;
+      el.volume = 1.0;
+      el.src = url;
+      try { el.currentTime = 0; } catch {}
+      try {
+        await el.play();
+        el.onended = () => {
+          this.revokeActiveAudioUrl();
+        };
+        return { ok: true, mode: 'HTML5 Audio (WAV)', state: this.playbackCtx?.state || 'ok' };
+      } catch (err) {
+        this.revokeActiveAudioUrl();
+        // Fall through to WebAudio playbackCtx test
+      }
+    }
+
+    if (this.playbackCtx) {
+      if (this.playbackCtx.state !== 'running') {
+        await this.playbackCtx.resume();
+      }
+      const samples = resample24kToRate(pcm, this.playbackCtx.sampleRate);
+      const buf = this.playbackCtx.createBuffer(1, samples.length, this.playbackCtx.sampleRate);
+      buf.getChannelData(0).set(samples);
+      const src = this.playbackCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.playbackGain || this.playbackCtx.destination);
+      src.start();
+      return { ok: true, mode: 'WebAudio', state: this.playbackCtx.state };
+    }
+    throw new Error('当前浏览器无可用音频输出设备');
+  }
+
   startTalking() {
     if (!this.connected || this.closed || this.recording || !this.generation) return;
 
     // Barge-in: immediately stop local playback when the user starts talking.
     this.stopPlayback();
-    this.audioCtx?.resume?.().catch(() => {});
+    this.unlockPlayback();
+    this.captureCtx?.resume?.().catch(() => {});
 
     const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID().slice(0, 12)
@@ -329,6 +707,7 @@ export class VehicleVoiceClient {
     this.pendingChunks = [];
     this.pendingBytes = 0;
     this.recording = true;
+    this.setMicEnabled(true);
 
     this.sendFrame({
       type: 'speech.started',
@@ -401,6 +780,7 @@ export class VehicleVoiceClient {
   stopTalking() {
     if (!this.recording) return;
     this.recording = false;
+    this.setMicEnabled(false);
     this.workletNode?.port.postMessage({ type: 'stop' });
 
     if (this.pendingBytes >= 2) {
@@ -425,35 +805,41 @@ export class VehicleVoiceClient {
   abortRecordingLocally() {
     if (!this.recording) return;
     this.recording = false;
+    this.setMicEnabled(false);
     this.workletNode?.port.postMessage({ type: 'stop' });
     this.pendingChunks = [];
     this.pendingBytes = 0;
   }
 
   enqueue24kPCM(encoded, playbackRef) {
-    if (this.closed || !this.audioCtx) return;
     const bytes = base64ToBytes(encoded);
-    if (bytes.length < 2) return;
+    this.enqueue24kPCMBytes(bytes, playbackRef);
+  }
 
-    const sampleCount = Math.floor(bytes.length / 2);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, sampleCount * 2);
-    const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, 24000);
-    const channel = audioBuffer.getChannelData(0);
-    for (let i = 0; i < sampleCount; i++) {
-      channel[i] = view.getInt16(i * 2, true) / 32768;
+  enqueue24kPCMBytes(bytes, playbackRef) {
+    if (this.closed || !this.playbackCtx || !bytes || bytes.length < 2) return;
+    if (this.playbackCtx.state === 'suspended') {
+      this.playbackCtx.resume?.().catch(() => {});
     }
 
-    const source = this.audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(this.audioCtx.destination);
+    const targetRate = this.playbackCtx.sampleRate || OUTPUT_SAMPLE_RATE;
+    const resampled = resample24kToRate(bytes, targetRate);
+    if (resampled.length === 0) return;
 
-    const startAt = Math.max(this.audioCtx.currentTime + 0.025, this.nextPlayTime);
+    const audioBuffer = this.playbackCtx.createBuffer(1, resampled.length, targetRate);
+    audioBuffer.getChannelData(0).set(resampled);
+
+    const source = this.playbackCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.playbackGain || this.playbackCtx.destination);
+
+    const startAt = Math.max(this.playbackCtx.currentTime + 0.025, this.nextPlayTime);
     this.nextPlayTime = startAt + audioBuffer.duration;
     this.activeSources.add(source);
 
     if (!this.playing) {
       this.playing = true;
-      this.emitState();
+      this.emitState({ playbackMode: 'webaudio' });
     }
 
     source.onended = () => {
@@ -487,6 +873,20 @@ export class VehicleVoiceClient {
   }
 
   stopPlayback() {
+    if (this.currentPlayback?.streamTimer) {
+      clearTimeout(this.currentPlayback.streamTimer);
+      this.currentPlayback.streamTimer = null;
+    }
+    if (this.audioEl) {
+      this.audioEl.onended = null;
+      this.audioEl.onerror = null;
+      try {
+        this.audioEl.pause();
+      } catch {}
+    }
+    this.activeAudioPlayback = null;
+    this.revokeActiveAudioUrl();
+
     for (const src of this.activeSources) {
       src.onended = null;
       try {
@@ -507,13 +907,29 @@ export class VehicleVoiceClient {
     try { this.micSource?.disconnect(); } catch {}
     try { this.workletNode?.disconnect(); } catch {}
     try { this.muteGain?.disconnect(); } catch {}
+    try { this.playbackGain?.disconnect(); } catch {}
     this.micSource = null;
     this.workletNode = null;
     this.muteGain = null;
-    if (this.audioCtx && this.audioCtx.state !== 'closed') {
-      this.audioCtx.close().catch(() => {});
+    this.playbackGain = null;
+
+    if (this.captureCtx && this.captureCtx.state !== 'closed') {
+      this.captureCtx.close().catch(() => {});
     }
-    this.audioCtx = null;
+    this.captureCtx = null;
+
+    if (this.playbackCtx && this.playbackCtx.state !== 'closed') {
+      this.playbackCtx.close().catch(() => {});
+    }
+    this.playbackCtx = null;
+
+    if (this.audioEl) {
+      try {
+        this.audioEl.pause();
+        this.audioEl.remove?.();
+      } catch {}
+    }
+    this.audioEl = null;
   }
 
   disconnect() {
