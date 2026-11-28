@@ -611,7 +611,7 @@ func (s *SQLiteStore) ListTasks(ctx context.Context, scope contract.Scope, input
 	}
 
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT task_id, COALESCE(command_id, ''), status, missing_fields_json, question, expires_at
+		SELECT task_id, COALESCE(command_id, ''), status, missing_fields_json, question, expires_at, device, tool, created_at
 		FROM vehicle_tasks
 		WHERE scope_key = ?
 		ORDER BY created_at DESC, task_id DESC
@@ -628,8 +628,10 @@ func (s *SQLiteStore) ListTasks(ctx context.Context, scope contract.Scope, input
 		var (
 			taskID, cmdID, rawStatus, missingJSON, question string
 			expiresStr                                      sql.NullString
+			operation                                       contract.Operation
+			createdStr                                      string
 		)
-		if err := rows.Scan(&taskID, &cmdID, &rawStatus, &missingJSON, &question, &expiresStr); err != nil {
+		if err := rows.Scan(&taskID, &cmdID, &rawStatus, &missingJSON, &question, &expiresStr, &operation.Device, &operation.Tool, &createdStr); err != nil {
 			return contract.ListTasksResult{}, err
 		}
 		var expPtr *time.Time
@@ -647,6 +649,7 @@ func (s *SQLiteStore) ListTasks(ctx context.Context, scope contract.Scope, input
 		}
 		var missing []string
 		_ = json.Unmarshal([]byte(missingJSON), &missing)
+		createdAt, _ := parseSQLiteTime(createdStr)
 		filtered = append(filtered, contract.TaskResult{
 			TaskID:        taskID,
 			CommandID:     cmdID,
@@ -654,6 +657,8 @@ func (s *SQLiteStore) ListTasks(ctx context.Context, scope contract.Scope, input
 			MissingFields: missing,
 			Question:      question,
 			ExpiresAt:     expPtr,
+			Operation:     &operation,
+			CreatedAt:     &createdAt,
 		})
 	}
 	if err := rows.Err(); err != nil {

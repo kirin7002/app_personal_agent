@@ -217,6 +217,17 @@ func evaluateWriteIntent(
 		return err
 	}
 
+	// A power-only write must not drop a temperature request in the same utterance.
+	if cat != nil && mut.Operation == (contract.Operation{Device: "hvac", Tool: "set_power"}) {
+		temperature, _, lookupErr := cat.LookupOperation(turn.Scope.VehicleID, contract.Operation{Device: "hvac", Tool: "set_temperature"})
+		if lookupErr == nil && hasExplicitActionForSpec(temperature, positiveText) {
+			return &contract.BusinessError{
+				Code:    contract.InvalidArgument,
+				Message: "原话同时要求调整温度，请使用 hvac.set_climate",
+			}
+		}
+	}
+
 	// Load live candidate records belonging to this turn's snapshot.
 	candidates := make([]tasks.TaskRecord, 0, len(turn.Candidates))
 	candidateByID := make(map[string]tasks.TaskRecord, len(turn.Candidates))

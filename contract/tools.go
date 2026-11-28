@@ -25,6 +25,8 @@ type TaskResult struct {
 	MissingFields []string   `json:"missing_fields,omitempty"`
 	Question      string     `json:"question,omitempty"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	Operation     *Operation `json:"operation,omitempty"`
+	CreatedAt     *time.Time `json:"created_at,omitempty"`
 }
 
 type ListTasksInput struct {

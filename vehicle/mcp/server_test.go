@@ -375,3 +375,47 @@ func TestOnToolCallObserverAndSanitization(t *testing.T) {
 		t.Fatalf("sensitive material leaked in audit event: %s", string(encoded))
 	}
 }
+
+func TestHVACPowerOnlyDoesNotCreateATemperatureFollowUp(t *testing.T) {
+	env := newTestEnv()
+	scope := contract.Scope{UserID: "U1", SessionID: "S1", VehicleID: "VCL1"}
+
+	env.registerTurn(t, scope, "R_ON", "TH_ON", "HS1", "打开空调")
+	for _, tool := range []string{"set_temperature", "set_climate"} {
+		_, failed, raw := env.callTool(t, "svc-secret", "TH_ON", "HS1", contract.CreateVehicleTask, map[string]any{
+			"device": "hvac", "tool": tool, "params": map[string]any{},
+		}, nil)
+		if !failed || decodeBizErr(t, raw).Code != contract.ClarificationRequired {
+			t.Fatalf("unexpected temperature task for a power-only utterance via %s: %s", tool, raw)
+		}
+	}
+
+	env.registerTurn(t, scope, "R_OFF", "TH_OFF", "HS1", "把空调关了")
+	for _, tc := range []struct{ handle, power string }{{"TH_ON", "on"}, {"TH_OFF", "off"}} {
+		_, failed, raw := env.callTool(t, "svc-secret", tc.handle, "HS1", contract.DispatchVehicleCommand, map[string]any{
+			"device": "hvac", "tool": "set_power", "params": map[string]any{"power": tc.power},
+		}, nil)
+		var result contract.TaskResult
+		if err := json.Unmarshal(raw, &result); err != nil || failed || result.Status != contract.PendingDispatch || result.CommandID == "" {
+			t.Fatalf("switching power %s must dispatch directly: %s (err=%v)", tc.power, raw, err)
+		}
+		command, err := env.taskStore.GetCommand(context.Background(), result.CommandID)
+		if err != nil || len(command.Params) != 1 || command.Params["power"] != tc.power {
+			t.Fatalf("switching power %s must preserve the temperature: command=%+v err=%v", tc.power, command, err)
+		}
+	}
+
+	env.registerTurn(t, scope, "R_BOTH", "TH_BOTH", "HS1", "打开空调并调到25度")
+	_, failed, raw := env.callTool(t, "svc-secret", "TH_BOTH", "HS1", contract.DispatchVehicleCommand, map[string]any{
+		"device": "hvac", "tool": "set_power", "params": map[string]any{"power": "on"},
+	}, nil)
+	if !failed || decodeBizErr(t, raw).Code != contract.InvalidArgument {
+		t.Fatalf("power-only action silently dropped a temperature request: %s", raw)
+	}
+	_, failed, raw = env.callTool(t, "svc-secret", "TH_BOTH", "HS1", contract.DispatchVehicleCommand, map[string]any{
+		"device": "hvac", "tool": "set_climate", "params": map[string]any{"power": "on", "temperature_c": 25},
+	}, nil)
+	if failed {
+		t.Fatalf("combined power and temperature instruction should succeed: %s", raw)
+	}
+}

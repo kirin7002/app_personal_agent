@@ -264,6 +264,12 @@ func (s *Service) ConfirmCommandEffect(
 				},
 			},
 		}
+	case contract.Operation{Device: "hvac", Tool: "set_power"}:
+		targetPower, _ := outcome.Normalized["power"].(string)
+		expected = []expectation{{
+			signal: "hvac.power",
+			check:  func(v any) bool { return v == targetPower },
+		}}
 	case contract.Operation{Device: "hvac", Tool: "set_climate"}:
 		targetPower, _ := outcome.Normalized["power"].(string)
 		targetTemp, _ := toFloat64(outcome.Normalized["temperature_c"])

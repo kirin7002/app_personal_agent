@@ -175,7 +175,7 @@ func (s *SimulatedChannel) applyTelemetryLocked(cmd contract.VehicleCommand, sam
 		if pos, ok := cmd.Params["position"].(string); ok && pos != "" {
 			s.Telemetry.Set(cmd.Scope.VehicleID, "window."+pos, "open", sampledAt)
 		}
-	case contract.Operation{Device: "hvac", Tool: "set_climate"}:
+	case contract.Operation{Device: "hvac", Tool: "set_power"}, contract.Operation{Device: "hvac", Tool: "set_climate"}:
 		if power, ok := cmd.Params["power"].(string); ok && power != "" {
 			s.Telemetry.Set(cmd.Scope.VehicleID, "hvac.power", power, sampledAt)
 		}

@@ -45,9 +45,12 @@ const state = {
   cursor: 0,
   telemetry: {},
   pendingTasks: [],
+  recentTasks: [],
   activeCommands: [],
   vehicleResults: [],
   rawState: null,
+  nextStateRequest: 0,
+  appliedStateRequest: 0,
 
   // Timeline state (idempotent & alias-aware)
   turnOrder: [], // canonical turnKey list
@@ -710,6 +713,10 @@ function tickLiveTimers() {
   if (state.pendingTasks.length > 0) {
     $('pendingBarTimer').textContent = `剩余 ${formatCountdown(state.pendingTasks[0].expires_at)}`;
   }
+  const taskDeadlines = $('recentTasksList').querySelectorAll('[data-expires-at]');
+  if (Array.from(taskDeadlines).some((node) => Date.parse(node.dataset.expiresAt) <= now)) {
+    renderRecentTasks(now);
+  }
 }
 
 // ===== Simulated Vehicle Panel Rendering =====
@@ -721,6 +728,40 @@ function readSignal(signals, name) {
   const value = pt.Value ?? pt.value ?? null;
   const sampledAt = pt.SampledAt ?? pt.sampled_at ?? null;
   return { available, value, sampledAt };
+}
+
+function renderRecentTasks(now = Date.now()) {
+  const list = $('recentTasksList');
+  $('recentTasksCount').textContent = String(state.recentTasks.length);
+  list.replaceChildren();
+  if (state.recentTasks.length === 0) {
+    list.append(el('p', 'panel-empty', '暂无任务'));
+    return;
+  }
+
+  for (const task of state.recentTasks) {
+    const { device, tool } = task.operation || {};
+    const capability = state.capabilities.find((cap) => cap.device === device && cap.tool === tool);
+    const title = capability?.title || (device && tool ? `${device}.${tool}` : '车辆任务');
+    const status = task.status === 'pending_reply' && Date.parse(task.expires_at) <= now ? 'expired' : task.status;
+    const label = { pending_reply: '待补充', failed: '执行失败' }[status] || STATUS_LABELS[status] || status;
+    const card = el('div', 'panel-card');
+    const head = el('div', 'panel-card-head');
+    head.append(el('strong', '', title), el('span', `turn-status ${status}`, label));
+    card.append(head);
+    if (status === 'pending_reply' && task.question) {
+      card.append(el('div', 'panel-card-sub', task.question));
+    }
+    const details = [formatClock(task.created_at), task.task_id].filter(Boolean).join(' · ');
+    const meta = el('div', 'panel-card-meta', details);
+    if (status === 'pending_reply' && task.expires_at) {
+      const timer = el('span', '', formatCountdown(task.expires_at));
+      timer.dataset.expiresAt = task.expires_at;
+      meta.append(' · 剩余 ', timer);
+    }
+    card.append(meta);
+    list.append(card);
+  }
 }
 
 function renderVehiclePanel() {
@@ -757,10 +798,9 @@ function renderVehiclePanel() {
     : `${hvacTemp.value} °C`;
   $('telemetryUpdatedAt').textContent = latestSample ? formatClock(latestSample) : '等待刷新';
 
-  // Pending tasks list + composer context bar
+  // Composer context for tasks that still need user input.
   const pending = state.pendingTasks || [];
   $('pendingCounter').textContent = String(pending.length);
-  $('pendingPanelCount').textContent = String(pending.length);
 
   const pendingBar = $('pendingBar');
   if (pending.length > 0) {
@@ -772,25 +812,7 @@ function renderVehiclePanel() {
     pendingBar.hidden = true;
   }
 
-  const pendingList = $('pendingList');
-  pendingList.replaceChildren();
-  if (!pending.length) {
-    pendingList.append(el('p', 'panel-empty', '暂无待补充任务'));
-  } else {
-    for (const task of pending) {
-      const card = el('div', 'panel-card');
-      const head = el('div', 'panel-card-head');
-      head.append(el('strong', '', `${task.device}.${task.tool}`));
-      const cd = el('span', 'panel-card-meta', formatCountdown(task.expires_at));
-      cd.dataset.expiresAt = task.expires_at || '';
-      head.append(cd);
-      card.append(head);
-      if (task.question) card.append(el('div', 'panel-card-sub', task.question));
-      const missing = Array.isArray(task.missing_fields) ? task.missing_fields.join(', ') : '';
-      card.append(el('div', 'panel-card-meta', `${task.task_id} · v${task.version ?? 1}${missing ? ` · 缺 ${missing}` : ''}`));
-      pendingList.append(card);
-    }
-  }
+  renderRecentTasks();
 
   // Active commands (with manual receipt buttons when debug enabled)
   const active = state.activeCommands || [];
@@ -918,9 +940,7 @@ function connectEventStream() {
         state.activeCommands = data.active_commands;
       }
       renderVehiclePanel();
-      if (!Array.isArray(data.pending_tasks)) {
-        refreshState({ quiet: true }).catch(() => {});
-      }
+      refreshState({ quiet: true }).catch(() => {});
     } catch {}
   });
 
@@ -1225,9 +1245,12 @@ async function loadCapabilities() {
 
 async function refreshState({ quiet = false } = {}) {
   if (state.needsAuth || !state.session) return;
+  const session = state.session;
+  const request = ++state.nextStateRequest;
   const qs = sessionQueryParams();
   const data = await apiFetch(`/api/state?${qs}`);
-  if (!data) return;
+  if (!data || state.session !== session || request < state.appliedStateRequest) return;
+  state.appliedStateRequest = request;
 
   state.rawState = data;
   if (typeof data.cursor === 'number' && data.cursor > state.cursor) {
@@ -1237,6 +1260,7 @@ async function refreshState({ quiet = false } = {}) {
     state.telemetry = data.telemetry;
   }
   state.pendingTasks = Array.isArray(data.pending_tasks) ? data.pending_tasks : [];
+  state.recentTasks = Array.isArray(data.recent_tasks) ? data.recent_tasks : [];
   state.activeCommands = Array.isArray(data.active_commands) ? data.active_commands : [];
   if (Array.isArray(data.vehicle_results)) {
     state.vehicleResults = data.vehicle_results;

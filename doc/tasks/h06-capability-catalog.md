@@ -5,7 +5,7 @@
 ## 模块与契约
 
 - `catalog.Service`：
-  - 注册核心操作：`window.close`、`window.open`、`window.get_status`、`hvac.set_temperature`、`hvac.set_climate`、`hvac.get_status`。
+  - 注册核心操作：`window.close`、`window.open`、`window.get_status`、`hvac.set_power`（保留设温）、`hvac.set_temperature`、`hvac.set_climate`、`hvac.get_status`。
   - 同一份 `OperationSpec` 同时输出 `contract.Capability.ParamsSchema` 与运行时 `ValidateMutation` 校验，支持按车型动态裁剪温度范围与禁用能力。
   - 实现 `contract.CapabilityFinder`（BM25 中英文 unigram/bigram + ASCII 分词），首轮零召回不限制后续 `SearchCapabilities` 补搜。
   - 提供 `GetVehicleStatus` 与 `AllWindowsClosed`：逐信号返回 `value`、`sampled_at` 与 `fresh`/`stale`/`unavailable`，任一车窗过期或不可用时不推断全部关闭。

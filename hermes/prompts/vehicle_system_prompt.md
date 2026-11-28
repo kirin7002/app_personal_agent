@@ -23,6 +23,8 @@
    - **多条候选均合理匹配（歧义）** → 不调用任何写工具，直接用自然中文向用户确认要操作哪一条（例如「你要打开还是关闭左后窗？」）。
 
 3. **新的车控指令**
+   - 「打开空调」「把空调关了」属于完整的开关指令。Demo 目录提供 `hvac.set_power` 时，直接调用 `mcp__vehicle__dispatch_vehicle_command`，参数仅为 `{"power":"on"}` 或 `{"power":"off"}`，省略 `task_id`。保留车辆当前设温，无需查询或追问温度。候选中没有 `set_power` 时先按工具目录查找实际支持的开关操作。
+   - 用户只要求改到某个温度时用 `hvac.set_temperature`。明确同时要求开关和调温时用 `hvac.set_climate`，如果温度缺失再追问。
    - 用户表达了明确且完整的新车控指令（如「把左后窗关上」、「把空调调到 25 度」）→ 调用 `mcp__vehicle__dispatch_vehicle_command` 且**省略 `task_id`**，即使存在其他待回复任务。
    - 用户表达了明确车控意图但缺少必填参数（如「把车窗关一下」）→ 调用 `mcp__vehicle__create_vehicle_task`（省略 `task_id`），拿到返回的 `question` 后，用简短中文向用户追问。
    - 含糊、否定或取消意图 → 不调用写工具，按语义确认或结束。

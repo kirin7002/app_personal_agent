@@ -42,6 +42,7 @@ func TestAcceptedDuplicateAndOutOfOrderReceipts(t *testing.T) {
 	tel := catalog.NewMemoryTelemetry()
 	cat := catalog.NewService(tel)
 	store := tasks.NewMemoryStore(tasks.NewCatalogValidator(cat))
+	store.Now = func() time.Time { return now }
 	sim := NewSimulatedChannel(tel)
 	sim.Mode = SimAcceptedOnly
 	sim.Caps.SupportsStatusQuery = false
@@ -347,7 +348,7 @@ func (r *simulatedHermesRunner) Start(ctx context.Context, req runs.StartRequest
 		if !isErr {
 			outText, _ = res["question"].(string)
 		}
-	case "打开空调":
+	case "打开空调并调一下温度":
 		isErr, res := callMCP(contract.CreateVehicleTask, map[string]any{
 			"device": "hvac", "tool": "set_climate", "params": map[string]any{"power": "on"},
 		})
@@ -487,7 +488,10 @@ func TestEndToEndTextEntrySingleFollowUpDualMatchTenMinExpiryAndDuplicateReceipt
 	now = now.Add(time.Minute)
 	rWin := postUtterance(t, utteranceHandler, "S1", "VCL1", "R3", "把车窗关一下")
 	now = now.Add(time.Minute)
-	rHVAC := postUtterance(t, utteranceHandler, "S1", "VCL1", "R4", "打开空调")
+	rHVAC := postUtterance(t, utteranceHandler, "S1", "VCL1", "R4", "打开空调并调一下温度")
+	if rHVAC.Status != contract.PendingReply || len(rHVAC.TaskID) == 0 {
+		t.Fatalf("explicit temperature adjustment without a setpoint must ask for the temperature: %+v", rHVAC)
+	}
 	now = now.Add(10 * time.Second)
 	rMatch := postUtterance(t, utteranceHandler, "S1", "VCL1", "R5", "左后窗")
 	if rMatch.TaskID != rWin.TaskID || rMatch.Status != contract.PendingDispatch {
@@ -579,5 +583,44 @@ func TestWorkerOnStageDispatchAndReceipt(t *testing.T) {
 	if len(stages) != 2 || stages[1].Stage != "executor.receipt" || stages[1].Status != "done" ||
 		stages[1].CommandStatus != contract.Completed || stages[1].EventID != cmd.CommandID+":completed" || stages[1].ReconcileMethod != "receipt" {
 		t.Fatalf("expected executor.receipt stage event, got %+v", stages)
+	}
+}
+
+func TestHVACPowerOnlyPreservesSetpointAndConfirmsWithPowerSignal(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	tel := catalog.NewMemoryTelemetry()
+	cat := catalog.NewService(tel)
+	store := tasks.NewMemoryStore(tasks.NewCatalogValidator(cat))
+	channel := NewSimulatedChannel(tel)
+	channel.Mode = SimAcceptedOnly
+	channel.Caps.SupportsStatusQuery = false
+	channel.Now = func() time.Time { return now }
+	worker := NewWorker("test-hvac-power", store, cat, channel)
+	worker.Now = func() time.Time { return now }
+	scope := contract.Scope{UserID: "U", SessionID: "S", VehicleID: "V"}
+	tel.Set(scope.VehicleID, "hvac.power", "off", now.Add(-time.Minute))
+	tel.Set(scope.VehicleID, "hvac.temperature_c", 27.0, now.Add(-time.Minute))
+
+	task := seedCommand(t, store, scope, "R", contract.Operation{Device: "hvac", Tool: "set_power"}, map[string]any{"power": "on"}, now)
+	if processed, err := worker.ProcessNext(ctx); err != nil || !processed {
+		t.Fatalf("process power command: %v, %v", processed, err)
+	}
+	cmd, err := store.GetCommand(ctx, task.CommandID)
+	if err != nil || cmd.Status != contract.Executing {
+		t.Fatalf("vehicle acceptance must not confirm the command: %+v, %v", cmd, err)
+	}
+	now = now.Add(time.Second)
+	channel.ApplyTelemetry(cmd.VehicleCommand, now)
+	if err := worker.ReconcileCommand(ctx, cmd.CommandID); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err = store.GetCommand(ctx, cmd.CommandID)
+	if err != nil || cmd.Status != contract.Completed {
+		t.Fatalf("fresh power signal should confirm the command: %+v, %v", cmd, err)
+	}
+	signals, err := tel.ReadSignals(ctx, scope.VehicleID, []string{"hvac.power", "hvac.temperature_c"})
+	if err != nil || signals["hvac.power"].Value != "on" || signals["hvac.temperature_c"].Value != 27.0 {
+		t.Fatalf("power-only command changed the setpoint: %+v, %v", signals, err)
 	}
 }
