@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -35,11 +36,24 @@ type BusEvent struct {
 }
 
 type runBinding struct {
-	Scope     contract.Scope
-	TurnID    string
-	RequestID string
-	Channel   string
-	UpdatedAt time.Time
+	Scope        contract.Scope
+	TurnID       string
+	RequestID    string
+	Channel      string
+	UpdatedAt    time.Time
+	Closed       bool
+	ClosedStatus string
+	ClosedAt     time.Time
+}
+
+type openHermesStep struct {
+	StepID    string
+	Kind      string // "tool" or "subagent"
+	Name      string // tool name or subagent name
+	Title     string
+	CallID    string
+	Preview   string
+	StartedAt time.Time
 }
 
 type eventSubscriber struct {
@@ -64,13 +78,14 @@ type scopeBucket struct {
 // EventBus maintains Scope-isolated bounded ring buffers, monotonic per-Scope
 // sequence numbers, fan-out SSE subscriptions, and unified payload sanitization.
 type EventBus struct {
-	mu           sync.RWMutex
-	capacity     int
-	pingInterval time.Duration
-	buckets      map[contract.Scope]*scopeBucket
-	runs         map[string]runBinding
-	secrets      []string
-	hermesSeq    uint64
+	mu              sync.RWMutex
+	capacity        int
+	pingInterval    time.Duration
+	buckets         map[contract.Scope]*scopeBucket
+	runs            map[string]runBinding
+	openHermesSteps map[string][]*openHermesStep
+	secrets         []string
+	hermesSeq       uint64
 }
 
 func NewEventBus(capacity int) *EventBus {
@@ -78,10 +93,11 @@ func NewEventBus(capacity int) *EventBus {
 		capacity = defaultEventRingCapacity
 	}
 	return &EventBus{
-		capacity:     capacity,
-		pingInterval: defaultSSEPingInterval,
-		buckets:      make(map[contract.Scope]*scopeBucket),
-		runs:         make(map[string]runBinding),
+		capacity:        capacity,
+		pingInterval:    defaultSSEPingInterval,
+		buckets:         make(map[contract.Scope]*scopeBucket),
+		runs:            make(map[string]runBinding),
+		openHermesSteps: make(map[string][]*openHermesStep),
 	}
 }
 
@@ -111,15 +127,20 @@ func (b *EventBus) BindRun(runID string, scope contract.Scope, turnID, requestID
 		for k, v := range b.runs {
 			if v.UpdatedAt.Before(cutoff) {
 				delete(b.runs, k)
+				delete(b.openHermesSteps, k)
 			}
 		}
 	}
+	prev := b.runs[runID]
 	b.runs[runID] = runBinding{
-		Scope:     scope,
-		TurnID:    turnID,
-		RequestID: requestID,
-		Channel:   channel,
-		UpdatedAt: now,
+		Scope:        scope,
+		TurnID:       turnID,
+		RequestID:    requestID,
+		Channel:      channel,
+		UpdatedAt:    now,
+		Closed:       prev.Closed,
+		ClosedStatus: prev.ClosedStatus,
+		ClosedAt:     prev.ClosedAt,
 	}
 }
 
@@ -529,6 +550,10 @@ func (b *EventBus) HandleTurnEvent(ev turns.TurnEvent) {
 		obs["error_message"] = ev.ErrorMessage
 	}
 
+	if ev.Stage == "hermes.run" && ev.RunID != "" && isTerminalStepStatus(ev.Status) {
+		b.reconcileHermesRunSteps(ev.RunID, ev.Status, ev.RunStatus, ev.ErrorCode, ev.FinishedAt)
+	}
+
 	b.Publish(ev.Scope, "process.step", map[string]any{
 		"turn_id":    ev.TurnID,
 		"request_id": ev.RequestID,
@@ -566,47 +591,335 @@ func (b *EventBus) HandleTurnEvent(ev turns.TurnEvent) {
 	}
 }
 
+func isTerminalStepStatus(status string) bool {
+	switch status {
+	case "done", "error", "interrupted":
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *EventBus) reconcileHermesRunSteps(runID, terminalStatus, runStatus, errorCode string, finishedAt *time.Time) {
+	endTime := time.Now().UTC()
+	if finishedAt != nil && !finishedAt.IsZero() {
+		endTime = finishedAt.UTC()
+	}
+
+	b.mu.Lock()
+	rb, ok := b.runs[runID]
+	if ok {
+		rb.Closed = true
+		rb.ClosedStatus = terminalStatus
+		rb.ClosedAt = endTime
+		rb.UpdatedAt = time.Now().UTC()
+		b.runs[runID] = rb
+	}
+	orphans := b.openHermesSteps[runID]
+	delete(b.openHermesSteps, runID)
+	b.mu.Unlock()
+
+	if !ok || len(orphans) == 0 {
+		return
+	}
+
+	for _, orphan := range orphans {
+		dur := endTime.Sub(orphan.StartedAt).Milliseconds()
+		if dur < 0 {
+			dur = 0
+		}
+		obs := map[string]any{
+			"action":     orphan.Kind + ".reconciled",
+			"error_code": errorCode,
+			"output": map[string]any{
+				"run_id":     runID,
+				"run_status": runStatus,
+				"reconciled": true,
+			},
+		}
+		if orphan.Preview != "" {
+			obs["input"] = map[string]any{"preview": orphan.Preview}
+		}
+		b.Publish(rb.Scope, "process.step", map[string]any{
+			"turn_id":    rb.TurnID,
+			"request_id": rb.RequestID,
+			"run_id":     runID,
+			"channel":    rb.Channel,
+			"step": map[string]any{
+				"step_id":       orphan.StepID,
+				"stage":         "hermes.run",
+				"title":         orphan.Title,
+				"status":        terminalStatus,
+				"started_at":    orphan.StartedAt.UTC().Format(time.RFC3339Nano),
+				"finished_at":   endTime.Format(time.RFC3339Nano),
+				"duration_ms":   dur,
+				"duration_kind": "boundary_wait",
+				"detail":        "run ended (" + terminalStatus + ")",
+				"observation":   obs,
+			},
+		})
+	}
+}
+
+func firstNonEmptyString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, _ := m[k].(string); strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func asFloat64(v any) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case float32:
+		return float64(x), true
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case json.Number:
+		f, err := x.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func classifyHermesStreamEvent(eventType string, decoded map[string]any) (kind, status string, terminal bool) {
+	switch {
+	case strings.HasPrefix(eventType, "tool."):
+		kind = "tool"
+	case strings.HasPrefix(eventType, "subagent."):
+		kind = "subagent"
+	default:
+		return "", "", false
+	}
+
+	lower := strings.ToLower(eventType)
+	switch {
+	case strings.HasSuffix(lower, ".failed"),
+		strings.HasSuffix(lower, ".error"),
+		strings.HasSuffix(lower, ".cancelled"),
+		strings.HasSuffix(lower, ".canceled"),
+		strings.HasSuffix(lower, ".aborted"):
+		return kind, "error", true
+	case strings.HasSuffix(lower, ".completed"),
+		strings.HasSuffix(lower, ".complete"),
+		strings.HasSuffix(lower, ".done"):
+		errFlag, _ := decoded["error"].(bool)
+		isErrFlag, _ := decoded["is_error"].(bool)
+		if errFlag || isErrFlag {
+			return kind, "error", true
+		}
+		return kind, "done", true
+	default:
+		return kind, "running", false
+	}
+}
+
+func (b *EventBus) popMatchingOpenHermesStepLocked(runID, kind, name, explicitCallID string) *openHermesStep {
+	list := b.openHermesSteps[runID]
+	if len(list) == 0 {
+		return nil
+	}
+	idx := -1
+	if explicitCallID != "" {
+		for i, s := range list {
+			if s.CallID == explicitCallID && s.Kind == kind {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			for i, s := range list {
+				if s.CallID == explicitCallID {
+					idx = i
+					break
+				}
+			}
+		}
+	}
+	if idx < 0 && name != "" {
+		for i, s := range list {
+			if s.Kind == kind && s.Name == name && (explicitCallID == "" || s.CallID == "") {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 && name == "" {
+		for i, s := range list {
+			if s.Kind == kind && (explicitCallID == "" || s.CallID == "") {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	matched := list[idx]
+	list = append(list[:idx], list[idx+1:]...)
+	if len(list) == 0 {
+		delete(b.openHermesSteps, runID)
+	} else {
+		b.openHermesSteps[runID] = list
+	}
+	return matched
+}
+
 func (b *EventBus) HandleHermesStreamEvent(runID, eventType string, raw json.RawMessage) {
-	rb, ok := b.lookupRun(runID)
-	if !ok {
-		return
-	}
-	// Only forward tool / subagent progress events; run lifecycle is covered by turns.Service hermes.run.
-	if !strings.HasPrefix(eventType, "tool.") && !strings.HasPrefix(eventType, "subagent.") {
-		return
-	}
 	var decoded map[string]any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		decoded = map[string]any{}
 	}
-	toolName, _ := decoded["tool"].(string)
-	if toolName == "" {
-		toolName, _ = decoded["name"].(string)
-	}
-	callKey, _ := decoded["call_id"].(string)
-	if callKey == "" {
-		callKey, _ = decoded["tool_call_id"].(string)
-	}
-	if callKey == "" {
-		b.mu.Lock()
-		b.hermesSeq++
-		callKey = strconv.FormatUint(b.hermesSeq, 10)
-		b.mu.Unlock()
+	// Only forward tool / subagent progress events; run lifecycle is covered by turns.Service hermes.run.
+	kind, status, isTerminal := classifyHermesStreamEvent(eventType, decoded)
+	if kind == "" {
+		return
 	}
 
-	status := "running"
-	title := "Hermes 工具进度"
-	if toolName != "" {
-		title = "Hermes 调用 " + toolName
+	name := firstNonEmptyString(decoded, "tool", "name", "subagent")
+	var explicitCallID string
+	if kind == "subagent" {
+		explicitCallID = firstNonEmptyString(decoded, "call_id", "tool_call_id", "subagent_id", "delegate_id")
+	} else {
+		explicitCallID = firstNonEmptyString(decoded, "call_id", "tool_call_id")
 	}
+	preview := firstNonEmptyString(decoded, "preview")
+
+	title := "Hermes 工具进度"
+	if kind == "subagent" {
+		title = "Hermes 子任务进度"
+		if name != "" {
+			title = "Hermes 子任务 " + name
+		}
+	} else if name != "" {
+		title = "Hermes 调用 " + name
+	}
+
 	now := time.Now().UTC()
-	var finishedAt any
-	if strings.HasSuffix(eventType, ".completed") || strings.HasSuffix(eventType, ".done") {
-		status = "done"
+	var (
+		rb           runBinding
+		stepID       string
+		startedAt    time.Time
+		finishedAt   any
+		durationMs   any
+		inputPreview string
+	)
+
+	b.mu.Lock()
+	var ok bool
+	rb, ok = b.runs[runID]
+	if !ok {
+		b.mu.Unlock()
+		return
+	}
+
+	if !isTerminal {
+		if rb.Closed {
+			// Run already finished; close immediately instead of opening a zombie running step.
+			if explicitCallID != "" {
+				stepID = "hermes:" + kind + ":" + explicitCallID
+			} else {
+				b.hermesSeq++
+				stepID = "hermes:" + kind + ":" + strconv.FormatUint(b.hermesSeq, 10)
+			}
+			startedAt = now
+			if !rb.ClosedAt.IsZero() && rb.ClosedAt.Before(now) {
+				startedAt = rb.ClosedAt
+			}
+			status = rb.ClosedStatus
+			if !isTerminalStepStatus(status) {
+				status = "done"
+			}
+			finishedAt = now.Format(time.RFC3339Nano)
+			dur := now.Sub(startedAt).Milliseconds()
+			if dur < 0 {
+				dur = 0
+			}
+			durationMs = dur
+		} else {
+			var existing *openHermesStep
+			if explicitCallID != "" {
+				for _, s := range b.openHermesSteps[runID] {
+					if s.CallID == explicitCallID && s.Kind == kind {
+						existing = s
+						break
+					}
+				}
+			}
+			if existing != nil {
+				stepID = existing.StepID
+				startedAt = existing.StartedAt
+				if name != "" {
+					existing.Name = name
+					existing.Title = title
+				}
+				if preview != "" && existing.Preview == "" {
+					existing.Preview = preview
+				}
+			} else {
+				callKey := explicitCallID
+				if callKey == "" {
+					b.hermesSeq++
+					callKey = strconv.FormatUint(b.hermesSeq, 10)
+				}
+				stepID = "hermes:" + kind + ":" + callKey
+				startedAt = now
+				b.openHermesSteps[runID] = append(b.openHermesSteps[runID], &openHermesStep{
+					StepID:    stepID,
+					Kind:      kind,
+					Name:      name,
+					Title:     title,
+					CallID:    explicitCallID,
+					Preview:   preview,
+					StartedAt: startedAt,
+				})
+			}
+		}
+	} else {
+		matched := b.popMatchingOpenHermesStepLocked(runID, kind, name, explicitCallID)
+		if matched != nil {
+			stepID = matched.StepID
+			startedAt = matched.StartedAt
+			inputPreview = matched.Preview
+			if name == "" && matched.Title != "" {
+				title = matched.Title
+			}
+			dur := now.Sub(startedAt).Milliseconds()
+			if dur < 0 {
+				dur = 0
+			}
+			durationMs = dur
+		} else {
+			callKey := explicitCallID
+			if callKey == "" {
+				b.hermesSeq++
+				callKey = strconv.FormatUint(b.hermesSeq, 10)
+			}
+			stepID = "hermes:" + kind + ":" + callKey
+			var dur int64
+			if sec, ok := asFloat64(decoded["duration"]); ok && sec > 0 {
+				dur = int64(math.Round(sec * 1000))
+			}
+			startedAt = now.Add(-time.Duration(dur) * time.Millisecond)
+			durationMs = dur
+		}
 		finishedAt = now.Format(time.RFC3339Nano)
-	} else if strings.HasSuffix(eventType, ".failed") || strings.HasSuffix(eventType, ".error") {
-		status = "error"
-		finishedAt = now.Format(time.RFC3339Nano)
+	}
+	b.mu.Unlock()
+
+	obs := map[string]any{
+		"action":     eventType,
+		"output":     decoded,
+		"error_code": "",
+	}
+	if isTerminal && inputPreview != "" {
+		obs["input"] = map[string]any{"preview": inputPreview}
 	}
 
 	b.Publish(rb.Scope, "process.step", map[string]any{
@@ -615,20 +928,16 @@ func (b *EventBus) HandleHermesStreamEvent(runID, eventType string, raw json.Raw
 		"run_id":     runID,
 		"channel":    rb.Channel,
 		"step": map[string]any{
-			"step_id":       "hermes:" + eventType + ":" + callKey,
+			"step_id":       stepID,
 			"stage":         "hermes.run",
 			"title":         title,
 			"status":        status,
-			"started_at":    now.Format(time.RFC3339Nano),
+			"started_at":    startedAt.UTC().Format(time.RFC3339Nano),
 			"finished_at":   finishedAt,
-			"duration_ms":   nil,
+			"duration_ms":   durationMs,
 			"duration_kind": "boundary_wait",
 			"detail":        eventType,
-			"observation": map[string]any{
-				"action":     eventType,
-				"output":     decoded,
-				"error_code": "",
-			},
+			"observation":   obs,
 		},
 	})
 }
