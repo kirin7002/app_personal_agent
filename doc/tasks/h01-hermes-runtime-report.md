@@ -10,9 +10,9 @@
 | Python / 依赖 | Python `3.14.9`、`mcp==2.3.0`、`httpx2`（SDK 内置） |
 | 模型与提供方 | `deepseek-v4.1-flash-1017`（`custom:vehicle-bailian`，`anthropic_messages`） |
 | MCP 传输与协议 | Streamable HTTP，`MCP-Protocol-Version: 2025-11-25` |
-| 配置样例 | [config.vehicle.yaml.example](../hermes/config.vehicle.yaml.example) |
-| 车控提示词 | [vehicle_system_prompt.md](../hermes/prompts/vehicle_system_prompt.md) |
-| 最小适配层 | [turn_binding_adapter.py](../hermes/turn_binding_adapter.py)、[gateway_launcher.py](../hermes/gateway_launcher.py) |
+| 配置样例 | [config.vehicle.yaml.example](../../hermes/config.vehicle.yaml.example) |
+| 车控提示词 | [vehicle_system_prompt.md](../../hermes/prompts/vehicle_system_prompt.md) |
+| 最小适配层 | [turn_binding_adapter.py](../../hermes/turn_binding_adapter.py)、[gateway_launcher.py](../../hermes/gateway_launcher.py) |
 
 ## 2. 上游 Hermes 评估与最小适配结论
 
@@ -28,7 +28,7 @@
 
 ### 2.2 已验证的最小非侵入适配层
 
-[turn_binding_adapter.py](../hermes/turn_binding_adapter.py) 不修改上游 Hermes 源码，在启动 [gateway_launcher.py](../hermes/gateway_launcher.py) 时安装 5 个最小挂钩：
+[turn_binding_adapter.py](../../hermes/turn_binding_adapter.py) 不修改上游 Hermes 源码，在启动 [gateway_launcher.py](../../hermes/gateway_launcher.py) 时安装 5 个最小挂钩：
 1. **入站接收**：在 `POST /v1/runs` 仅从受信任 HTTP 头读取 `X-Vehicle-Turn-Handle` 与 `X-Vehicle-Hermes-Session-ID`（绝不进入 `input`、`instructions` 或工具参数），按 `run_id` 和 `session_authority` 的 `admission_id` 注册，并在 Run 结束/取消时清理。
 2. **执行绑定**：同时覆盖直接执行（`_run_agent_sync`）与持久化会话权威（`session_ingress._admission_scope`），为当前 Run 绑定隔离的 `ContextVar`。
 3. **跨事件循环透传**：在 Agent 执行线程捕获本轮元数据，显式携入 `mcp-event-loop` 的任务局部 `ContextVar`。
@@ -79,7 +79,7 @@ go test -race ./... && go vet ./...
 go run ./cmd/h01probe -out hermes/testdata/h01-live-probe-report.json
 ```
 
-脱敏实测结果保存在 [h01-live-probe-report.json](../hermes/testdata/h01-live-probe-report.json)，全部 10 项探针通过：
+脱敏实测结果保存在 [h01-live-probe-report.json](../../hermes/testdata/h01-live-probe-report.json)，全部 10 项探针通过：
 - `scenario_a_run1_create_task`: `true`（「把车窗关一下」→ `create_vehicle_task` → `T101`，追问车窗位置）
 - `scenario_a_run2_resume_dispatch`: `true`（「左后窗」→ `dispatch_vehicle_command(task_id=T101, position=rear_left)` → `C88` `pending_dispatch`，播报「正在关闭左后车窗。」）
 - `scenario_b_dual_candidate_match`: `true`（`T202` 空调 + `T201` 车窗并存时，「左后窗」唯一续办 `T201`，保留 `T202` 为 `pending_reply`）

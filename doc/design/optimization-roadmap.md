@@ -1,6 +1,6 @@
 # 车端个人 Agent 架构优化路线图
 
-> 本文档基于当前 `app_personal_agent` 基线代码（`main` / `2a3b207`）、[H07 联调与延迟基线](./h07-end-to-end.md)，并结合 [业务 MCP 工具清单](./mcp/业务%20MCP%20工具清单.md)、[MCP 工具 Schema](./mcp/MCP%20工具%20Schema.md) 以及同源 Python 架构参考（[系统架构参考](./old/personalagetn架构.md)、[BM25 检索参考](./old/BM25.md)），梳理后续工程化扩量、降延迟与生产上线的可优化项。
+> 本文档基于当前 `app_personal_agent` 基线代码（`main` / `2a3b207`）、[H07 联调与延迟基线](../tasks/h07-end-to-end.md)，并结合 [业务 MCP 工具清单](../mcp/业务%20MCP%20工具清单.md)、[MCP 工具 Schema](../mcp/MCP%20工具%20Schema.md) 以及同源 Python 架构参考（[系统架构参考](../old/personalagetn架构.md)、[BM25 检索参考](../old/BM25.md)），梳理后续工程化扩量、降延迟与生产上线的可优化项。
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### 1.1 当前基线评估
 
-当前项目已完成 H00–H09 全链路闭环及 SQLite/MySQL 双存储支持（并完成 PR #12 的恢复路径与播放回执持久化加固），实测核心基线如下（数据来源：[H07 联调报告](./h07-end-to-end.md#延迟基线)）：
+当前项目已完成 H00–H09 全链路闭环及 SQLite/MySQL 双存储支持（并完成 PR #12 的恢复路径与播放回执持久化加固），实测核心基线如下（数据来源：[H07 联调报告](../tasks/h07-end-to-end.md#延迟基线)）：
 
 | 维度 | 当前现状 | 主要瓶颈 / 待演进点 |
 | --- | --- | --- |
@@ -53,7 +53,7 @@
 
 **现状痛点**
 - `vehicle/catalog/catalog.go` 的 `defaultOperationSpecs()` 仅硬编码了 6 个 `window` / `hvac` Demo 操作；`FieldSpec` 仅支持 `string`、`number`、`array_string` 三种基础类型，无法表达真实业务 Schema 的复杂约束。
-- 对照 [业务 MCP 工具清单](./mcp/业务%20MCP%20工具清单.md) 与 [MCP 工具 Schema](./mcp/MCP%20工具%20Schema.md)，真实车控/车况/备车 MCP 已具备 31 个工具（dev 注册 26 个），存在大量 Demo 未覆盖的协议特征：
+- 对照 [业务 MCP 工具清单](../mcp/业务%20MCP%20工具清单.md) 与 [MCP 工具 Schema](../mcp/MCP%20工具%20Schema.md)，真实车控/车况/备车 MCP 已具备 31 个工具（dev 注册 26 个），存在大量 Demo 未覆盖的协议特征：
   - **互斥参数组**：如 `ac_ctrl` 中 `temperature`（绝对设温）与 `temperature_tune`（相对调温）互斥；
   - **字符串型数值枚举与复合结构**：如档位/延时字段为字符串枚举（`"0"` / `"2"` / `"5"` / `"10"`），`vehicle_prep_ctrl` 包含嵌套动作数组与预约时间；
   - **本地辅助与后过滤**：如 `resolve_time_tool`（先解析自然语言时间再调预约工具）、`query_car_status`（本地信号聚合查询与字段裁剪）；
@@ -70,7 +70,7 @@
 
 **验证标准**
 - 新增一个车端工具仅需提交声明式配置与映射单测，无需修改 `vehicle/catalog` 核心代码；
-- 覆盖 [MCP 工具 Schema](./mcp/MCP%20工具%20Schema.md) 中全部 26 个已注册工具的 Schema 生成、边界值校验、互斥参数拒收与敏感字段剥离单测。
+- 覆盖 [MCP 工具 Schema](../mcp/MCP%20工具%20Schema.md) 中全部 26 个已注册工具的 Schema 生成、边界值校验、互斥参数拒收与敏感字段剥离单测。
 
 ---
 
@@ -83,7 +83,7 @@
   3. **缺少车端语料归一化**：无汽车领域同义词映射（如 `风速→风量`、`抬头显示→hud`、`香薰→香氛`、`起雾→除雾`、`车门玻璃→车窗`），且未剥离位置词（`主驾/副驾/左后/二排`），导致位置词在多设备间抢占匹配分；
   4. **缺少大枚举门控与意图对齐**：接入 `deeplink_ctrl`（页面跳转）或大量座椅/车灯/应用枚举工具后，纯 BM25 极易出现误召回或「查状态 vs 控车」排序反转。
 
-**优化方案（借鉴 [BM25.md](./old/BM25.md) 并针对性改良）**
+**优化方案（借鉴 [BM25.md](../old/BM25.md) 并针对性改良）**
 1. **6 字段加权 BM25 + 启动时离线预计算稀疏权重表**：
    - 拆分字段并赋权：`title`（2.8）、`slot`（2.2）、`trigger`（2.1）、`name`（1.2）、`category`（1.1）、`desc`（0.75，构建索引前自动剥离反例句）；
    - 启动加载目录或热更新版本时一次性计算 `bm25Weights[term]`（参考 `k1=1.2, b=0.25`），查询期仅按车型启用的能力掩码做 O(query_terms) 查表累加，**将 94 工具召回稳定压在 < 1ms**。
@@ -130,7 +130,7 @@
 ### P1-1：解耦版单步控车「短路收尾」+ Token 限额 + 会话轮换
 
 **现状痛点**
-- [H07 延迟基线](./h07-end-to-end.md#延迟基线) 显示，车控热连接从说完到首帧音频的 P50 为 **5.276s**（P95 **5.532s**），冷连接高达 **6.827s**（P95 **8.003s**），远高于闲聊的 **1.42s**。
+- [H07 延迟基线](../tasks/h07-end-to-end.md#延迟基线) 显示，车控热连接从说完到首帧音频的 P50 为 **5.276s**（P95 **5.532s**），冷连接高达 **6.827s**（P95 **8.003s**），远高于闲聊的 **1.42s**。
 - 查看 `vehicle/turns/service.go`（第 220–248 行）可以发现：当本轮发生 `create_vehicle_task`（`pending_reply`）或 `dispatch_vehicle_command`（`pending_dispatch` / `executing`）写入后，Go 侧 `Service.reply()` **直接依据 `ProgressReader` 生成确定性播报文本**（追问文案或「正在处理车辆指令。」），**完全忽略了 Hermes 跑完工具调用后二次调用大模型生成的 `run.Output`**！这意味尾轮大模型总结 RTT（通常 1.5s–2.5s）属于 100% 无效等待。
 - 同时，`vehicle/turns/service.go:169` 将 Hermes 会话 ID 固定为 `"vehicle-" + scopeKey(turn.Scope)`，长期对话缺乏上下文预算管理与会话代次轮换，会导致历史上下文越积越长、首轮推理越来越慢。
 
@@ -239,7 +239,7 @@
 ### P2-4：生产环境加固、真实通道接入与升级守门
 
 **现状痛点**
-- [H07 联调报告](./h07-end-to-end.md#故障与边界覆盖) 明确指出，真实车辆通道、车机麦克风/扬声器、百炼业务空间专属域名及真实样本规模下的 P50/P95 仍有待真环境验证。
+- [H07 联调报告](../tasks/h07-end-to-end.md#故障与边界覆盖) 明确指出，真实车辆通道、车机麦克风/扬声器、百炼业务空间专属域名及真实样本规模下的 P50/P95 仍有待真环境验证。
 - `hermes/turn_binding_adapter.py` 通过运行时 Hook 适配了 Hermes `vgit.72c88037` 的若干内部函数（`_handle_runs`、`_execute_run`、`_run_agent_sync`、`_admission_scope`、`_call_tool_racing_stdio_death` 等），未来升级 Hermes 存在签名漂移风险。
 - 文字端与语音端尚未共享统一的持久化时间线与播放状态回传视图。
 
@@ -258,7 +258,7 @@
 
 ## 6. 借鉴老项目时必须规避的反模式
 
-在吸收 [doc/old](./old/personalagetn架构.md) 中优秀工程实践的同时，以下 6 类做法**不得原样搬入**当前项目：
+在吸收 [doc/old](../old/personalagetn架构.md) 中优秀工程实践的同时，以下 6 类做法**不得原样搬入**当前项目：
 
 | 老项目做法 | 潜在风险 | 本项目改良策略 |
 | --- | --- | --- |

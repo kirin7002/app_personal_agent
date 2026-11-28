@@ -1,6 +1,6 @@
 # H08 车端音频网关
 
-将 `gateway.Gateway` 挂到 `GET /voice/audio`，注入会话认证、S2S、H02 轮次服务及候选读取、H05 结果读取、可信文本 TTS。网关按 [H00](vehicle-contract.md) 协商 PCM16LE（输入 16 kHz，输出 24 kHz）和控制帧。明确日常短句直接使用 S2S，车辆相关、短补参和无法确定的候选交给 H02。
+将 `gateway.Gateway` 挂到 `GET /voice/audio`，注入会话认证、S2S、H02 轮次服务及候选读取、H05 结果读取、可信文本 TTS。网关按 [H00](../design/vehicle-contract.md) 协商 PCM16LE（输入 16 kHz，输出 24 kHz）和控制帧。明确日常短句直接使用 S2S，车辆相关、短补参和无法确定的候选交给 H02。
 
 车端起讲时立即停止本地播放，网关停止旧播放并取消在途工作。若取消发生在 Qwen 提交或生成的关联 ID 尚未确认时，网关更换连接代数并提示重新采集。已登记的业务命令由 Go 继续跟踪。重连时，网关从结果读取接口获取保留期内的对应业务事件。播放 ID 跨重连稳定，车端应持久化已经消费的 ID。MySQL 和 SQLite 结果存储同时实现 `contract.ResultPlaybackReceipts`。网关把已收到的播放回执或用户打断的结果播报写入 `vehicle_playback_receipts`，重启后仍提供业务结果并跳过已确认的音频。进程内存储用于模拟。车端应持久化已消费的播放 ID，以便在播放完成但回执丢失的情况下去重。
 
