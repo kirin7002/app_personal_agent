@@ -1,6 +1,6 @@
 # H00 语音车控共享契约
 
-Go 模块为 `github.com/kirin7002/app_personal_agent`。该仓库的初始基线包含设计和实施计划。车端客户端、TTS、数据库迁移、车辆事件通道由任务卡引入。Go 契约在 [contract](../contract)，A/B 和错误报文在 [testdata](../contract/testdata)。
+Go 模块为 `github.com/kirin7002/app_personal_agent`。该仓库的初始基线包含设计和实施计划。车端客户端、TTS、数据库迁移、车辆事件通道由任务卡引入。Go 契约在 [contract](../../contract)，A/B 和错误报文在 [testdata](../../contract/testdata)。
 
 | 边界 | 提供方 → 消费方 | 契约 |
 | --- | --- | --- |
@@ -9,7 +9,7 @@ Go 模块为 `github.com/kirin7002/app_personal_agent`。该仓库的初始基�
 | 可信轮次 | H02 → H01 → H04 | H02 先持久化 `TurnContext` 和候选版本，H01 通过认证的服务链路传播 `TurnMetadata`，H04 调用 `TurnRegistry` 并在写事务内重校验轮次。 |
 | 写入结果 | H03 / H04 → H02 | `ProgressReader` 根据可信作用域与 `request_id` 读本轮实际状态和追问。H02 按该状态批准播报。 |
 | 车辆结果 | H05 → H08 | `ResultReader` 返回保留期内的独立事件，H08 按完整 `Scope` 路由并按 `event_id` 去重。 |
-| 工具 | H04 → H01 | 六个原始工具名和 Go 输入输出见 [tools.go](../contract/tools.go)。错误结果采用 MCP `isError=true`，内容为 `BusinessError`，同一 JSON 可置于 `structuredContent` 与兼容文本内容。 |
+| 工具 | H04 → H01 | 六个原始工具名和 Go 输入输出见 [tools.go](../../contract/tools.go)。错误结果采用 MCP `isError=true`，内容为 `BusinessError`，同一 JSON 可置于 `structuredContent` 与兼容文本内容。 |
 | 车辆指令 | H03 → H05 | Go 在登记 outbox 的事务内分配唯一 `command_id`。同一命令重试复用该 ID。如通道返回自身 ID，H05 持久化其与 `command_id` 的关联。 |
 
 ## 轮次与车辆状态

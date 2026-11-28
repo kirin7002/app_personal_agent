@@ -1,8 +1,8 @@
 # H03 任务存储（MySQL / SQLite）、过期扫描与命令 Outbox
 
 `vehicle/tasks` 实现车控任务持久化、10 分钟待回复到期控制、单轮单写幂等、命令 Outbox 与单调状态结果事件 Outbox，提供：
-- `MySQLStore`（InnoDB + `FOR UPDATE` / `FOR UPDATE SKIP LOCKED`，迁移见 [tasks.sql](../vehicle/tasks/tasks.sql)）
-- `SQLiteStore`（纯 Go `modernc.org/sqlite`，WAL + `busy_timeout=5000` + `BEGIN IMMEDIATE`，迁移见 [sqlite.sql](../vehicle/tasks/sqlite.sql)，可通过 `tasks.OpenSQLite(path)` 一键初始化 `voice_turns` 与 `vehicle_tasks` 等全套表）
+- `MySQLStore`（InnoDB + `FOR UPDATE` / `FOR UPDATE SKIP LOCKED`，迁移见 [tasks.sql](../../vehicle/tasks/tasks.sql)）
+- `SQLiteStore`（纯 Go `modernc.org/sqlite`，WAL + `busy_timeout=5000` + `BEGIN IMMEDIATE`，迁移见 [sqlite.sql](../../vehicle/tasks/sqlite.sql)，可通过 `tasks.OpenSQLite(path)` 一键初始化 `voice_turns` 与 `vehicle_tasks` 等全套表）
 - `MemoryStore`（单进程模拟）
 
 ## SQLite 快速接线
@@ -14,7 +14,7 @@ taskStore := tasks.NewSQLiteStore(db, tasks.NewCatalogValidator(cat))
 // mcp.NewServer 传入 Turns: turnStore, Tasks: taskStore 即可自动走 LockWritableTurnSQLite，与 Cancel 串行化
 ```
 
-## 数据库表（[tasks.sql](../vehicle/tasks/tasks.sql)）
+## 数据库表（[tasks.sql](../../vehicle/tasks/tasks.sql)）
 
 - `vehicle_tasks`：任务主表，含 `scope_key`、`status`、`version`、`known_params_json`、`missing_fields_json`、`question`、`command_id`（唯一约束）、`expires_at` 及复合索引 `(scope_key, status, expires_at, created_at, task_id)`、`(status, expires_at)`。
 - `vehicle_turn_writes`：按 `(scope_key, request_id)` 唯一记录每轮首次成功写入的规范化指纹与业务结果，实现同参重放返回原 ID、异参报 `IDEMPOTENCY_CONFLICT`。
