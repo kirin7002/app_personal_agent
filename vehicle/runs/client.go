@@ -38,6 +38,11 @@ type Client struct {
 
 	// Enable only after confirming durable idempotency on the deployed Hermes.
 	RetryAdmission bool
+
+	// OnStreamEvent is an optional read-only observer invoked for deduplicated
+	// Hermes SSE events (tool.started, tool.completed, subagent.*, run.*) on
+	// GET /v1/runs/{run_id}/events. When nil, streaming behavior is unchanged.
+	OnStreamEvent func(runID, eventType string, raw json.RawMessage)
 }
 
 func New(base, key string, client *http.Client) (*Client, error) {
@@ -240,18 +245,22 @@ func (c *Client) stream(ctx context.Context, id string, seq *int64) (Run, error)
 		if data.Len() == 0 {
 			continue
 		}
+		raw := bytes.TrimSpace([]byte(data.String()))
 		var ev struct {
 			Run
 			Event string `json:"event"`
 			Seq   int64  `json:"seq"`
 		}
-		err := json.Unmarshal([]byte(data.String()), &ev)
+		err := json.Unmarshal(raw, &ev)
 		data.Reset()
 		if err != nil || ev.ID != id || (ev.Seq > 0 && ev.Seq <= *seq) {
 			continue
 		}
 		if ev.Seq > *seq {
 			*seq = ev.Seq
+		}
+		if c.OnStreamEvent != nil && ev.Event != "" {
+			c.OnStreamEvent(id, ev.Event, append(json.RawMessage(nil), raw...))
 		}
 		ev.Run.Status = strings.TrimPrefix(ev.Event, "run.")
 		if strings.HasPrefix(ev.Event, "run.") && ev.Run.Terminal() {

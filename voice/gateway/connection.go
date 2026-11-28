@@ -44,8 +44,12 @@ type jobEvent struct {
 
 type playback struct {
 	id         string
+	source     string
+	turnID     string
+	requestID  string
 	generation uint64
 	sequence   uint64
+	audioBytes int
 	started    time.Time
 }
 
@@ -235,26 +239,76 @@ func (c *connection) emit(j *job, event jobEvent) bool {
 func (c *connection) commit(j *job, media contract.S2SSession) {
 	ctx, cancel := context.WithTimeout(j.ctx, 12*time.Second)
 	defer cancel()
-	start := time.Now()
+	start := time.Now().UTC()
 	final, err := media.Commit(ctx)
+	end := time.Now().UTC()
+	dur := end.Sub(start).Milliseconds()
 	c.gateway.timing("transcript.final", start, "voice_turn_id", j.capture.turnID)
 	if err != nil || final.InputItemID == "" || final.ProviderSessionID == "" || strings.TrimSpace(final.Text) == "" {
 		if err == nil {
 			err = errors.New("invalid final transcript")
 		}
+		if j.ctx.Err() == nil {
+			c.gateway.emitEvent(GatewayEvent{
+				Scope:        c.scope,
+				TurnID:       j.capture.turnID,
+				RequestID:    j.capture.requestID,
+				Stage:        "voice.asr",
+				Status:       "error",
+				StartedAt:    start,
+				FinishedAt:   &end,
+				DurationMs:   &dur,
+				DurationKind: "boundary_wait",
+				AudioBytes:   j.capture.bytes,
+				ErrorMessage: err.Error(),
+			})
+		}
 		c.emit(j, jobEvent{finished: true, err: err})
 		return
 	}
+	c.gateway.emitEvent(GatewayEvent{
+		Scope:        c.scope,
+		TurnID:       j.capture.turnID,
+		RequestID:    j.capture.requestID,
+		Stage:        "voice.asr",
+		Status:       "done",
+		StartedAt:    start,
+		FinishedAt:   &end,
+		DurationMs:   &dur,
+		DurationKind: "boundary_wait",
+		Transcript:   final.Text,
+		AudioBytes:   j.capture.bytes,
+	})
 	c.emit(j, jobEvent{transcript: &final})
 }
 
 func (c *connection) route(j *job, final contract.FinalTranscript) {
-	start := time.Now()
+	start := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(j.ctx, 2*time.Second)
 	defer cancel()
 	pending, err := c.gateway.Pending.ListPending(ctx, c.scope, time.Now().UTC())
 	vehicle := err != nil || !plainChat(final.Text, pending)
+	end := time.Now().UTC()
+	dur := end.Sub(start).Milliseconds()
 	c.gateway.timing("route", start, "voice_turn_id", j.capture.turnID, "vehicle", vehicle)
+	routeName := "native_s2s"
+	if vehicle {
+		routeName = "vehicle_hermes"
+	}
+	c.gateway.emitEvent(GatewayEvent{
+		Scope:        c.scope,
+		TurnID:       j.capture.turnID,
+		RequestID:    j.capture.requestID,
+		Stage:        "voice.route",
+		Status:       "done",
+		StartedAt:    start,
+		FinishedAt:   &end,
+		DurationMs:   &dur,
+		DurationKind: "measured_local",
+		Transcript:   final.Text,
+		Route:        routeName,
+		PendingCount: len(pending),
+	})
 	c.emit(j, jobEvent{routed: true, vehicle: vehicle, transcript: &final})
 }
 
@@ -382,10 +436,46 @@ func (c *connection) onWork(event jobEvent) {
 	}
 }
 
+func playbackSource(id string) string {
+	switch {
+	case strings.HasPrefix(id, "chat-"):
+		return "native"
+	case strings.HasPrefix(id, "reply-"):
+		return "reply"
+	case strings.HasPrefix(id, "result-"):
+		return "result"
+	default:
+		return "unknown"
+	}
+}
+
 func (c *connection) startPlayback(id string) {
-	p := &playback{id: id, generation: c.gateway.nextPlayback.Add(1), started: time.Now()}
+	var turnID, requestID string
+	if c.current != nil {
+		turnID = c.current.capture.turnID
+		requestID = c.current.capture.requestID
+	}
+	p := &playback{
+		id:         id,
+		source:     playbackSource(id),
+		turnID:     turnID,
+		requestID:  requestID,
+		generation: c.gateway.nextPlayback.Add(1),
+		started:    time.Now().UTC(),
+	}
 	c.playing = p
 	c.state.issued(p.id, p.generation)
+	c.gateway.emitEvent(GatewayEvent{
+		Scope:          c.scope,
+		TurnID:         p.turnID,
+		RequestID:      p.requestID,
+		Stage:          "voice.playback",
+		Status:         "running",
+		StartedAt:      p.started,
+		DurationKind:   "boundary_wait",
+		PlaybackID:     p.id,
+		PlaybackSource: p.source,
+	})
 	c.write(contract.CarFrame{Type: contract.PlaybackStart, PlaybackID: p.id, PlaybackGeneration: p.generation})
 }
 
@@ -395,6 +485,7 @@ func (c *connection) audio(pcm []byte) {
 			c.gateway.timing("audio.output", p.started, "playback_id", p.id)
 		}
 		p.sequence++
+		p.audioBytes += len(pcm)
 		c.write(contract.CarFrame{Type: contract.AudioOutput, PlaybackID: p.id, PlaybackGeneration: p.generation, Sequence: p.sequence, Audio: pcm})
 	}
 }
@@ -402,6 +493,35 @@ func (c *connection) audio(pcm []byte) {
 func (c *connection) stopPlayback(reason string) {
 	if p := c.playing; p != nil {
 		c.playing = nil
+		end := time.Now().UTC()
+		dur := end.Sub(p.started).Milliseconds()
+		status := "done"
+		switch reason {
+		case "completed":
+			status = "done"
+		case "interrupted":
+			status = "interrupted"
+		default:
+			status = "error"
+		}
+		// Output format is 24 kHz mono PCM16LE (48,000 bytes/sec).
+		audioDurMs := int64(p.audioBytes) * 1000 / (24000 * 2)
+		c.gateway.emitEvent(GatewayEvent{
+			Scope:           c.scope,
+			TurnID:          p.turnID,
+			RequestID:       p.requestID,
+			Stage:           "voice.playback",
+			Status:          status,
+			StartedAt:       p.started,
+			FinishedAt:      &end,
+			DurationMs:      &dur,
+			DurationKind:    "boundary_wait",
+			AudioBytes:      p.audioBytes,
+			PlaybackID:      p.id,
+			PlaybackSource:  p.source,
+			PlaybackReason:  reason,
+			AudioDurationMs: audioDurMs,
+		})
 		c.write(contract.CarFrame{Type: contract.PlaybackStop, PlaybackID: p.id, PlaybackGeneration: p.generation, Reason: reason})
 		if reason == "interrupted" {
 			c.settlePlayback(p.id, p.generation)

@@ -324,3 +324,54 @@ func TestWriteGuardsQueryNegationAmbiguityCrossScopeAndCancel(t *testing.T) {
 		}
 	}
 }
+
+func TestOnToolCallObserverAndSanitization(t *testing.T) {
+	env := newTestEnv()
+	var events []ToolAuditEvent
+	env.server = NewServer(Config{
+		ServiceToken: "svc-secret",
+		Turns:        env.turnStore,
+		Tasks:        env.taskStore,
+		Catalog:      env.cat,
+		Now:          func() time.Time { return env.now },
+		OnToolCall: func(ev ToolAuditEvent) {
+			events = append(events, ev)
+		},
+	})
+
+	scope := contract.Scope{UserID: "U1", SessionID: "S1", VehicleID: "VCL1"}
+	env.registerTurn(t, scope, "RAUDIT1", "TH-SECRET-HANDLE", "HS-AUD", "把车窗关一下")
+
+	// 1. Successful write tool emits running + done with Scope, TaskID, WriteStatus, DurationMs.
+	_, isErr, _ := env.callTool(t, "svc-secret", "TH-SECRET-HANDLE", "HS-AUD", contract.CreateVehicleTask, map[string]any{
+		"device": "window", "tool": "close", "params": map[string]any{},
+	}, nil)
+	if isErr {
+		t.Fatalf("expected create_vehicle_task success")
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 audit events (running+done), got %d", len(events))
+	}
+	if events[0].Status != "running" || events[0].Scope != scope || events[0].TurnID != "VT-RAUDIT1" || events[0].RequestID != "RAUDIT1" {
+		t.Fatalf("unexpected running audit event: %+v", events[0])
+	}
+	if events[1].Status != "done" || events[1].CallID != events[0].CallID || events[1].TaskID == "" || events[1].WriteStatus != contract.PendingReply || events[1].DurationMs == nil {
+		t.Fatalf("unexpected done audit event: %+v", events[1])
+	}
+
+	// 2. Forbidden identity arg call emits error audit event WITHOUT leaking turn_handle or api_key.
+	events = nil
+	_, isErr, _ = env.callTool(t, "svc-secret", "TH-SECRET-HANDLE", "HS-AUD", contract.CreateVehicleTask, map[string]any{
+		"device": "window", "tool": "close", "turn_handle": "LEAK-ME", "params": map[string]any{"api_key": "SECRET-KEY"},
+	}, nil)
+	if !isErr {
+		t.Fatal("expected error for forbidden argument")
+	}
+	if len(events) != 1 || !events[0].IsError || events[0].ErrorCode != contract.InvalidArgument {
+		t.Fatalf("expected 1 error audit event, got %+v", events)
+	}
+	encoded, _ := json.Marshal(events[0])
+	if bytes.Contains(encoded, []byte("LEAK-ME")) || bytes.Contains(encoded, []byte("SECRET-KEY")) || bytes.Contains(encoded, []byte("TH-SECRET-HANDLE")) {
+		t.Fatalf("sensitive material leaked in audit event: %s", string(encoded))
+	}
+}

@@ -221,3 +221,51 @@ func TestSearchManualModelAndVersionIsolation(t *testing.T) {
 		t.Fatalf("expected model-version isolated manual excerpt, got %+v", sedanRes.Excerpts[0])
 	}
 }
+
+func TestListCapabilitiesReadOnlyExport(t *testing.T) {
+	svc := NewService(nil)
+	svc.SetVehicleProfile(VehicleProfile{
+		VehicleID:     "VCL_TRIM",
+		Model:         "EV-SUV-2026",
+		ManualVersion: DefaultCatalogVersion,
+		MinTempC:      19,
+		MaxTempC:      27,
+		DisabledOps:   map[contract.Operation]bool{{Device: "window", Tool: "open"}: true},
+	})
+
+	caps := svc.ListCapabilities("VCL_TRIM")
+	if len(caps) != 5 {
+		t.Fatalf("expected 5 enabled capabilities (6 default minus 1 disabled), got %d", len(caps))
+	}
+	var foundTemp bool
+	for _, c := range caps {
+		if c.Device == "window" && c.Tool == "open" {
+			t.Fatalf("disabled capability window.open must not be exported")
+		}
+		if c.Device == "hvac" && c.Tool == "set_temperature" {
+			foundTemp = true
+			if c.MCPTool != contract.DispatchVehicleCommand || c.Description == "" || len(c.Aliases) == 0 || len(c.Utterances) == 0 {
+				t.Fatalf("incomplete CapabilityInfo metadata: %+v", c)
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(c.ParamsSchema, &schema); err != nil {
+				t.Fatalf("invalid params_schema: %v", err)
+			}
+			props := schema["properties"].(map[string]any)
+			temp := props["temperature_c"].(map[string]any)
+			if temp["minimum"].(float64) != 19 || temp["maximum"].(float64) != 27 {
+				t.Fatalf("expected profile bounds [19,27], got %+v", temp)
+			}
+			// Mutating returned slice must not affect subsequent calls.
+			c.Aliases[0] = "MUTATED"
+		}
+	}
+	if !foundTemp {
+		t.Fatal("expected hvac.set_temperature in exported capabilities")
+	}
+	for _, c := range svc.ListCapabilities("VCL_TRIM") {
+		if c.Device == "hvac" && c.Tool == "set_temperature" && c.Aliases[0] == "MUTATED" {
+			t.Fatal("ListCapabilities must return a defensive copy of Aliases")
+		}
+	}
+}

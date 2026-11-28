@@ -82,3 +82,49 @@ func TestPollingTerminalBeforeStream(t *testing.T) {
 		t.Fatalf("unexpected result %+v %v", got, err)
 	}
 }
+
+func TestOnStreamEventObserver(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/run_obs":
+			fmt.Fprint(w, `{"run_id":"run_obs","status":"running"}`)
+		case "/v1/runs/run_obs/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"event\":\"tool.started\",\"run_id\":\"run_obs\",\"tool\":\"create_vehicle_task\",\"seq\":1}\n\n")
+			fmt.Fprint(w, "data: {\"event\":\"tool.completed\",\"run_id\":\"run_obs\",\"tool\":\"create_vehicle_task\",\"seq\":2}\n\n")
+			// Duplicate seq should be ignored.
+			fmt.Fprint(w, "data: {\"event\":\"tool.completed\",\"run_id\":\"run_obs\",\"tool\":\"create_vehicle_task\",\"seq\":2}\n\n")
+			fmt.Fprint(w, "data: {\"event\":\"run.completed\",\"run_id\":\"run_obs\",\"output\":\"ok\",\"seq\":3}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c, err := New(server.URL, "key", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	var payloads []json.RawMessage
+	c.OnStreamEvent = func(runID, eventType string, raw json.RawMessage) {
+		if runID != "run_obs" {
+			t.Errorf("unexpected runID %q", runID)
+		}
+		seen = append(seen, eventType)
+		payloads = append(payloads, raw)
+	}
+	got, err := c.Wait(context.Background(), "run_obs")
+	if err != nil || got.Status != "completed" {
+		t.Fatalf("Wait failed: %+v %v", got, err)
+	}
+	want := []string{"tool.started", "tool.completed", "run.completed"}
+	if len(seen) != len(want) {
+		t.Fatalf("expected events %v, got %v", want, seen)
+	}
+	for i := range want {
+		if seen[i] != want[i] || len(payloads[i]) == 0 {
+			t.Fatalf("event[%d] mismatch: got %q (%s), want %q", i, seen[i], string(payloads[i]), want[i])
+		}
+	}
+}

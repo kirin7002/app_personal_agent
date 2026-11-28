@@ -11,7 +11,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kirin7002/app_personal_agent/contract"
@@ -37,6 +39,28 @@ var forbiddenIdentityArgs = map[string]bool{
 	"_meta":             true,
 }
 
+// ToolAuditEvent is a sanitized read-only observation of a single MCP tools/call execution.
+type ToolAuditEvent struct {
+	CallID       string
+	Scope        contract.Scope
+	TurnID       string
+	RequestID    string
+	ToolName     string
+	IsWrite      bool
+	Status       string // "running", "done", "error"
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	DurationMs   *int64
+	Arguments    map[string]any
+	Output       any
+	IsError      bool
+	ErrorCode    contract.ErrorCode
+	ErrorMessage string
+	TaskID       string
+	CommandID    string
+	WriteStatus  contract.Status
+}
+
 // Config configures the H04 Go MCP HTTP server.
 type Config struct {
 	// ServiceToken is required in Authorization: Bearer <token> when non-empty.
@@ -57,10 +81,14 @@ type Config struct {
 	Catalog *catalog.Service
 	// Now overrides clock for deterministic testing.
 	Now func() time.Time
+	// OnToolCall is an optional read-only observer notified at the start and end
+	// of every tools/call invocation with sanitized arguments and structured output.
+	OnToolCall func(ToolAuditEvent)
 }
 
 type Server struct {
-	cfg Config
+	cfg    Config
+	callID atomic.Uint64
 }
 
 func NewServer(cfg Config) *Server {
@@ -182,6 +210,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleToolCall(ctx context.Context, hdr http.Header, rawParams json.RawMessage) map[string]any {
+	startedAt := time.Now().UTC()
 	var params callToolParams
 	if err := json.Unmarshal(rawParams, &params); err != nil {
 		return errorResult(&contract.BusinessError{
@@ -193,47 +222,148 @@ func (s *Server) handleToolCall(ctx context.Context, hdr http.Header, rawParams 
 		params.Arguments = map[string]any{}
 	}
 
+	var auditBase ToolAuditEvent
+	emitAudit := s.cfg.OnToolCall != nil
+	if emitAudit {
+		seq := s.callID.Add(1)
+		auditBase = ToolAuditEvent{
+			CallID:    "mcp:" + params.Name + ":" + strconv.FormatUint(seq, 10),
+			ToolName:  params.Name,
+			IsWrite:   params.Name == contract.CreateVehicleTask || params.Name == contract.DispatchVehicleCommand,
+			StartedAt: startedAt,
+			Arguments: sanitizeAuditMap(params.Arguments),
+		}
+	}
+
+	finishAudit := func(res map[string]any) map[string]any {
+		if !emitAudit {
+			return res
+		}
+		end := time.Now().UTC()
+		dur := end.Sub(startedAt).Milliseconds()
+		ev := auditBase
+		ev.FinishedAt = &end
+		ev.DurationMs = &dur
+		ev.Status = "done"
+		if isErr, _ := res["isError"].(bool); isErr {
+			ev.IsError = true
+			ev.Status = "error"
+		}
+		if sc, ok := res["structuredContent"]; ok {
+			ev.Output = sanitizeAuditValue(sc)
+			switch v := sc.(type) {
+			case contract.BusinessError:
+				ev.ErrorCode = v.Code
+				ev.ErrorMessage = v.Message
+			case *contract.BusinessError:
+				if v != nil {
+					ev.ErrorCode = v.Code
+					ev.ErrorMessage = v.Message
+				}
+			case contract.TaskResult:
+				ev.TaskID = v.TaskID
+				ev.CommandID = v.CommandID
+				ev.WriteStatus = v.Status
+			}
+		}
+		s.cfg.OnToolCall(ev)
+		return res
+	}
+
 	// Reject any untrusted identity/turn field smuggled in model tool arguments.
 	for k := range params.Arguments {
 		if forbiddenIdentityArgs[k] {
-			return errorResult(&contract.BusinessError{
+			return finishAudit(errorResult(&contract.BusinessError{
 				Code:    contract.InvalidArgument,
 				Message: "forbidden identity argument: " + k,
-			})
+			}))
 		}
 	}
 
 	meta, err := s.extractTrustedMetadata(hdr, params.Meta)
 	if err != nil {
-		return errorResult(err)
+		return finishAudit(errorResult(err))
 	}
 	if s.cfg.Turns == nil || s.cfg.Tasks == nil || s.cfg.Catalog == nil {
-		return errorResult(&contract.BusinessError{
+		return finishAudit(errorResult(&contract.BusinessError{
 			Code:      contract.CapabilityUnavailable,
 			Message:   "vehicle MCP dependencies not configured",
 			Retryable: true,
-		})
+		}))
 	}
 
 	now := s.now()
+	if emitAudit {
+		if turn, resolveErr := s.cfg.Turns.ResolveTurn(ctx, meta, now); resolveErr == nil {
+			auditBase.Scope = turn.Scope
+			auditBase.TurnID = turn.VoiceTurnID
+			auditBase.RequestID = turn.RequestID
+		}
+		runningEv := auditBase
+		runningEv.Status = "running"
+		s.cfg.OnToolCall(runningEv)
+	}
+
 	switch params.Name {
 	case contract.CreateVehicleTask:
-		return s.callWriteTool(ctx, meta, params.Arguments, false, now)
+		return finishAudit(s.callWriteTool(ctx, meta, params.Arguments, false, now))
 	case contract.DispatchVehicleCommand:
-		return s.callWriteTool(ctx, meta, params.Arguments, true, now)
+		return finishAudit(s.callWriteTool(ctx, meta, params.Arguments, true, now))
 	case contract.ListVehicleTasks:
-		return s.callListTasks(ctx, meta, params.Arguments, now)
+		return finishAudit(s.callListTasks(ctx, meta, params.Arguments, now))
 	case contract.GetVehicleStatus:
-		return s.callGetStatus(ctx, meta, params.Arguments, now)
+		return finishAudit(s.callGetStatus(ctx, meta, params.Arguments, now))
 	case contract.SearchVehicleManual:
-		return s.callSearchManual(ctx, meta, params.Arguments, now)
+		return finishAudit(s.callSearchManual(ctx, meta, params.Arguments, now))
 	case contract.SearchVehicleCapabilities:
-		return s.callSearchCapabilities(ctx, meta, params.Arguments, now)
+		return finishAudit(s.callSearchCapabilities(ctx, meta, params.Arguments, now))
 	default:
-		return errorResult(&contract.BusinessError{
+		return finishAudit(errorResult(&contract.BusinessError{
 			Code:    contract.CapabilityUnavailable,
 			Message: "unknown MCP tool: " + params.Name,
-		})
+		}))
+	}
+}
+
+func isSensitiveAuditKey(k string) bool {
+	if forbiddenIdentityArgs[k] {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(k))
+	for _, needle := range []string{"turn_handle", "authorization", "token", "api_key", "apikey", "secret", "password", "cookie", "dsn"} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeAuditMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		if isSensitiveAuditKey(k) {
+			continue
+		}
+		out[k] = sanitizeAuditValue(v)
+	}
+	return out
+}
+
+func sanitizeAuditValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return sanitizeAuditMap(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = sanitizeAuditValue(item)
+		}
+		return out
+	default:
+		return v
 	}
 }
 

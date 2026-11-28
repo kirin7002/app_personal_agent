@@ -20,6 +20,51 @@ type Runner interface {
 	Stop(context.Context, string) error
 }
 
+type TurnEvent struct {
+	Scope          contract.Scope
+	TurnID         string
+	RequestID      string
+	RunID          string
+	TaskID         string
+	CommandID      string
+	Channel        string // "text" or "voice"
+	StepID         string
+	Stage          string // "catalog.recall", "hermes.run", "turn.reply"
+	Title          string
+	Status         string // "running", "done", "error", "interrupted"
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	DurationMs     *int64
+	DurationKind   string // "measured_local", "boundary_wait", "instant"
+	Detail         string
+	CandidateTools []string
+	PendingCount   int
+	PendingTaskIDs []string
+	RunStatus      string
+	ReplyStatus    contract.Status
+	ReplyText      string
+	ErrorCode      string
+	ErrorMessage   string
+}
+
+type turnEventSinkKey struct{}
+
+// WithTurnEventSink attaches an optional per-turn read-only observer to ctx.
+func WithTurnEventSink(ctx context.Context, sink func(TurnEvent)) context.Context {
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, turnEventSinkKey{}, sink)
+}
+
+func turnEventSinkFromContext(ctx context.Context) func(TurnEvent) {
+	if ctx == nil {
+		return nil
+	}
+	sink, _ := ctx.Value(turnEventSinkKey{}).(func(TurnEvent))
+	return sink
+}
+
 type Service struct {
 	Store        Store
 	Pending      contract.PendingReader
@@ -31,6 +76,24 @@ type Service struct {
 	// RetryAdmission should match the Hermes client's verified idempotency setting.
 	RetryAdmission bool
 	Now            func() time.Time
+	// OnEvent is an optional read-only observer for turn execution stages.
+	OnEvent func(TurnEvent)
+}
+
+func (s *Service) emitEvent(ctx context.Context, ev TurnEvent) {
+	if s.OnEvent != nil {
+		s.OnEvent(ev)
+	}
+	if sink := turnEventSinkFromContext(ctx); sink != nil {
+		sink(ev)
+	}
+}
+
+func turnChannel(turn contract.VehicleTurn) string {
+	if turn.FinalTranscript.ProviderSessionID == "text" {
+		return "text"
+	}
+	return "voice"
 }
 
 func (s *Service) now() time.Time {
@@ -128,6 +191,7 @@ func (s *Service) HandleVehicleTurn(ctx context.Context, turn contract.VehicleTu
 
 func (s *Service) register(ctx context.Context, turn contract.VehicleTurn) (Record, error) {
 	now := s.now()
+	recallStart := time.Now().UTC()
 	pending, err := s.ListPending(ctx, turn.Scope, now)
 	if err != nil {
 		return Record{}, err
@@ -140,8 +204,10 @@ func (s *Service) register(ctx context.Context, turn contract.VehicleTurn) (Reco
 		capabilities = []contract.Capability{}
 	}
 	versions := make([]contract.CandidateVersion, 0, len(pending))
+	pendingIDs := make([]string, 0, len(pending))
 	for _, candidate := range pending {
 		versions = append(versions, contract.CandidateVersion{TaskID: candidate.TaskID, Version: candidate.Version})
+		pendingIDs = append(pendingIDs, candidate.TaskID)
 		found := false
 		for _, capability := range capabilities {
 			if capability.Operation == candidate.Operation {
@@ -155,6 +221,12 @@ func (s *Service) register(ctx context.Context, turn contract.VehicleTurn) (Reco
 			})
 		}
 	}
+	candidateTools := make([]string, 0, len(capabilities))
+	for _, c := range capabilities {
+		candidateTools = append(candidateTools, c.Device+"."+c.Tool)
+	}
+	recallEnd := time.Now().UTC()
+	recallDur := recallEnd.Sub(recallStart).Milliseconds()
 	instructions, err := json.Marshal(struct {
 		Capabilities []contract.Capability       `json:"candidate_tools"`
 		Pending      []contract.PendingCandidate `json:"pending_tasks"`
@@ -178,62 +250,209 @@ func (s *Service) register(ctx context.Context, turn contract.VehicleTurn) (Reco
 		},
 		IdempotencyKey: rand.Text(),
 	}
-	return record, s.Store.Register(ctx, record)
+	if err := s.Store.Register(ctx, record); err != nil {
+		return record, err
+	}
+	s.emitEvent(ctx, TurnEvent{
+		Scope:          turn.Scope,
+		TurnID:         turn.VoiceTurnID,
+		RequestID:      turn.RequestID,
+		Channel:        turnChannel(turn),
+		StepID:         "catalog.recall",
+		Stage:          "catalog.recall",
+		Title:          "BM25 能力预筛与待办加载",
+		Status:         "done",
+		StartedAt:      recallStart,
+		FinishedAt:     &recallEnd,
+		DurationMs:     &recallDur,
+		DurationKind:   "measured_local",
+		CandidateTools: candidateTools,
+		PendingCount:   len(pending),
+		PendingTaskIDs: pendingIDs,
+	})
+	return record, nil
 }
 
 func (s *Service) run(ctx context.Context, record *Record) (runs.Run, error) {
+	runStart := time.Now().UTC()
+	turn := record.Context.VehicleTurn
+	ch := turnChannel(turn)
+	s.emitEvent(ctx, TurnEvent{
+		Scope:        turn.Scope,
+		TurnID:       turn.VoiceTurnID,
+		RequestID:    turn.RequestID,
+		RunID:        record.RunID,
+		Channel:      ch,
+		StepID:       "hermes.run",
+		Stage:        "hermes.run",
+		Title:        "Hermes 意图理解与编排",
+		Status:       "running",
+		StartedAt:    runStart,
+		DurationKind: "boundary_wait",
+	})
+	emitDone := func(run runs.Run, err error) {
+		end := time.Now().UTC()
+		dur := end.Sub(runStart).Milliseconds()
+		status := "done"
+		var errCode, errMsg string
+		switch {
+		case errors.Is(err, context.Canceled) || run.Status == "cancelled" || run.Status == "canceled" || run.Status == "interrupted":
+			status = "interrupted"
+			if err != nil {
+				errMsg = err.Error()
+			}
+		case err != nil:
+			status = "error"
+			var be *contract.BusinessError
+			if errors.As(err, &be) {
+				errCode = string(be.Code)
+				errMsg = be.Message
+			} else {
+				errMsg = err.Error()
+			}
+		case run.Status != "" && run.Status != "completed":
+			status = "error"
+			errMsg = "hermes run status: " + run.Status
+		}
+		runID := record.RunID
+		if runID == "" {
+			runID = run.ID
+		}
+		s.emitEvent(ctx, TurnEvent{
+			Scope:        turn.Scope,
+			TurnID:       turn.VoiceTurnID,
+			RequestID:    turn.RequestID,
+			RunID:        runID,
+			Channel:      ch,
+			StepID:       "hermes.run",
+			Stage:        "hermes.run",
+			Title:        "Hermes 意图理解与编排",
+			Status:       status,
+			StartedAt:    runStart,
+			FinishedAt:   &end,
+			DurationMs:   &dur,
+			DurationKind: "boundary_wait",
+			RunStatus:    run.Status,
+			ErrorCode:    errCode,
+			ErrorMessage: errMsg,
+		})
+	}
 	if record.RunID == "" {
 		if record.AdmissionAttempted && !s.RetryAdmission {
+			emitDone(runs.Run{}, runs.ErrAdmissionUnknown)
 			return runs.Run{}, runs.ErrAdmissionUnknown
 		}
 		if !record.Context.ExpiresAt.After(s.now()) {
-			return runs.Run{}, invalidTurn()
+			err := invalidTurn()
+			emitDone(runs.Run{}, err)
+			return runs.Run{}, err
 		}
 		record.AdmissionAttempted = true
 		if err := s.Store.Save(ctx, *record); err != nil {
+			emitDone(runs.Run{}, err)
 			return runs.Run{}, err
 		}
 		meta := contract.TurnMetadata{TurnHandle: record.Context.TurnHandle, HermesSessionID: record.Context.HermesSessionID}
 		start, err := s.Runs.Start(ctx, record.Payload, meta, record.IdempotencyKey)
 		if err != nil {
+			emitDone(runs.Run{}, err)
 			return runs.Run{}, err
 		}
 		record.RunID = start.ID
+		// Notify observers immediately with the assigned RunID before Wait() streams events.
+		s.emitEvent(ctx, TurnEvent{
+			Scope:        turn.Scope,
+			TurnID:       turn.VoiceTurnID,
+			RequestID:    turn.RequestID,
+			RunID:        record.RunID,
+			Channel:      ch,
+			StepID:       "hermes.run",
+			Stage:        "hermes.run",
+			Title:        "Hermes 意图理解与编排",
+			Status:       "running",
+			StartedAt:    runStart,
+			DurationKind: "boundary_wait",
+			RunStatus:    start.Status,
+		})
 		// Persist a received Run ID even when the vehicle disconnects at admission.
 		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		if err := s.Store.Save(saveCtx, *record); err != nil {
+			emitDone(runs.Run{}, err)
 			return runs.Run{}, err
 		}
 		current, err := s.Store.Get(saveCtx, record.Context.Scope, record.Context.VoiceTurnID)
 		if err != nil {
+			emitDone(runs.Run{}, err)
 			return runs.Run{}, err
 		}
 		if current.Cancelled {
 			_ = s.Runs.Stop(saveCtx, record.RunID)
+			emitDone(runs.Run{ID: record.RunID, Status: "cancelled"}, context.Canceled)
 			return runs.Run{}, context.Canceled
 		}
 	}
-	return s.Runs.Wait(ctx, record.RunID)
+	res, err := s.Runs.Wait(ctx, record.RunID)
+	emitDone(res, err)
+	return res, err
 }
 
 func (s *Service) reply(ctx context.Context, record Record, run runs.Run, runErr error) (contract.SpeechReply, error) {
+	replyStart := time.Now().UTC()
 	binding := record.Context
 	reply := contract.SpeechReply{VoiceTurnID: binding.VoiceTurnID, RequestID: binding.RequestID, RunID: record.RunID}
+	emitReply := func(rep contract.SpeechReply, err error) (contract.SpeechReply, error) {
+		end := time.Now().UTC()
+		dur := end.Sub(replyStart).Milliseconds()
+		status := "done"
+		var errCode, errMsg string
+		if err != nil {
+			status = "error"
+			var be *contract.BusinessError
+			if errors.As(err, &be) {
+				errCode = string(be.Code)
+				errMsg = be.Message
+			} else {
+				errMsg = err.Error()
+			}
+		}
+		s.emitEvent(ctx, TurnEvent{
+			Scope:        binding.Scope,
+			TurnID:       binding.VoiceTurnID,
+			RequestID:    binding.RequestID,
+			RunID:        rep.RunID,
+			TaskID:       rep.TaskID,
+			CommandID:    rep.CommandID,
+			Channel:      turnChannel(binding.VehicleTurn),
+			StepID:       "turn.reply",
+			Stage:        "turn.reply",
+			Title:        "权威状态核验与答复生成",
+			Status:       status,
+			StartedAt:    replyStart,
+			FinishedAt:   &end,
+			DurationMs:   &dur,
+			DurationKind: "measured_local",
+			ReplyStatus:  rep.Status,
+			ReplyText:    rep.Text,
+			ErrorCode:    errCode,
+			ErrorMessage: errMsg,
+		})
+		return rep, err
+	}
 	progress, err := s.Progress.ReadTurnProgress(ctx, binding.Scope, binding.RequestID)
 	if errors.Is(err, contract.ErrTurnHasNoWrite) {
 		if runErr != nil {
-			return reply, runErr
+			return emitReply(reply, runErr)
 		}
 		if run.Status != "completed" {
 			reply.Text = "这次未能处理，请再说一次。"
-			return reply, nil
+			return emitReply(reply, nil)
 		}
 		reply.Text = strings.TrimSpace(run.Output)
-		return reply, nil
+		return emitReply(reply, nil)
 	}
 	if err != nil {
-		return reply, err
+		return emitReply(reply, err)
 	}
 	reply.TaskID, reply.CommandID, reply.Status = progress.TaskID, progress.CommandID, progress.Status
 	switch progress.Status {
@@ -244,7 +463,7 @@ func (s *Service) reply(ctx context.Context, record Record, run runs.Run, runErr
 	case contract.Expired:
 		reply.Text = "这条待办已过期，请再说一次。"
 	}
-	return reply, nil
+	return emitReply(reply, nil)
 }
 
 func (s *Service) CancelVehicleTurn(ctx context.Context, scope contract.Scope, id string) error {

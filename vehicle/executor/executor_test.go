@@ -538,3 +538,41 @@ func TestRetryableSendRetainsStableCommand(t *testing.T) {
 		t.Fatalf("retry must reuse its ID and publish one completion: %+v, %v", events, err)
 	}
 }
+
+func TestWorkerOnStageDispatchAndReceipt(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	tel := catalog.NewMemoryTelemetry()
+	cat := catalog.NewService(tel)
+	store := tasks.NewMemoryStore(tasks.NewCatalogValidator(cat))
+	channel := NewSimulatedChannel(tel)
+	channel.Mode = SimAcceptedOnly
+	channel.Now = func() time.Time { return now }
+
+	var stages []StageEvent
+	worker := NewWorker("stage-worker", store, cat, channel)
+	worker.Now = func() time.Time { return now }
+	worker.OnStage = func(ev StageEvent) { stages = append(stages, ev) }
+
+	scope := contract.Scope{UserID: "U", SessionID: "S", VehicleID: "sim-car"}
+	cmd := seedCommand(t, store, scope, "req-stage", contract.Operation{Device: "window", Tool: "close"}, map[string]any{"position": "rear_left"}, now)
+	if processed, err := worker.ProcessNext(ctx); !processed || err != nil {
+		t.Fatalf("ProcessNext failed: processed=%v err=%v", processed, err)
+	}
+	if len(stages) != 1 || stages[0].Stage != "executor.dispatch" || stages[0].Status != "done" || stages[0].DownstreamID == "" || stages[0].CommandID != cmd.CommandID {
+		t.Fatalf("expected executor.dispatch stage event, got %+v", stages)
+	}
+
+	if err := worker.HandleReceipt(ctx, VehicleReceipt{
+		CommandID:    cmd.CommandID,
+		DownstreamID: stages[0].DownstreamID,
+		Status:       ReceiptCompleted,
+		OccurredAt:   now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("HandleReceipt failed: %v", err)
+	}
+	if len(stages) != 2 || stages[1].Stage != "executor.receipt" || stages[1].Status != "done" ||
+		stages[1].CommandStatus != contract.Completed || stages[1].EventID != cmd.CommandID+":completed" || stages[1].ReconcileMethod != "receipt" {
+		t.Fatalf("expected executor.receipt stage event, got %+v", stages)
+	}
+}

@@ -20,6 +20,27 @@ type LateEvidence struct {
 	ReceivedAt time.Time
 }
 
+// StageEvent is an optional read-only observation of executor dispatch and receipt milestones.
+type StageEvent struct {
+	Stage           string // "executor.dispatch" or "executor.receipt"
+	Status          string // "running", "done", "waiting", "error"
+	Scope           contract.Scope
+	Operation       contract.Operation
+	TaskID          string
+	CommandID       string
+	RequestID       string
+	DownstreamID    string
+	EventID         string
+	CommandStatus   contract.Status
+	Params          map[string]any
+	Reason          string
+	ReconcileMethod string
+	Attempts        uint32
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	DurationMs      int64
+}
+
 // Worker claims pending commands from H03's outbox, validates capabilities before
 // sending, dispatches via VehicleChannel, handles receipts & telemetry confirmation,
 // and emits deduplicated VehicleResultEvents for H08.
@@ -36,6 +57,7 @@ type Worker struct {
 	Now             func() time.Time
 
 	OnEvent        func(contract.VehicleResultEvent)
+	OnStage        func(StageEvent)
 	OnLateEvidence func(LateEvidence)
 
 	// CrashBeforeSendOnce and CrashAfterSendOnce are deterministic test hooks
@@ -128,7 +150,7 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 	// Case 2: Re-check vehicle capability and preconditions right before dispatch.
 	if w.Catalog != nil {
 		if _, _, err := w.Catalog.ValidateMutation(cmd.Scope.VehicleID, cmd.Operation, cmd.Params, true); err != nil {
-			return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, "precondition failed: "+err.Error(), now)
+			return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, "precondition failed: "+err.Error(), "precondition", now)
 		}
 	}
 
@@ -146,7 +168,10 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 		return true, err
 	}
 
+	sendStart := time.Now().UTC()
 	resp, sendErr := w.Channel.SendCommand(ctx, cmd.VehicleCommand)
+	sendEnd := time.Now().UTC()
+	sendDur := sendEnd.Sub(sendStart).Milliseconds()
 	if w.CrashAfterSendOnce {
 		w.CrashAfterSendOnce = false
 		return true, nil
@@ -163,28 +188,117 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 	switch resp.Kind {
 	case OutcomeAccepted:
 		// Acceptance receipt advances ONLY to executing; never emit completed yet.
-		return true, w.Store.MarkCommandExecuting(ctx, cmd.CommandID, w.WorkerID, now, resp.DownstreamID)
+		if err := w.Store.MarkCommandExecuting(ctx, cmd.CommandID, w.WorkerID, now, resp.DownstreamID); err != nil {
+			return true, err
+		}
+		w.emitStage(StageEvent{
+			Stage:         "executor.dispatch",
+			Status:        "done",
+			Scope:         cmd.Scope,
+			Operation:     cmd.Operation,
+			TaskID:        cmd.TaskID,
+			CommandID:     cmd.CommandID,
+			RequestID:     cmd.RequestID,
+			DownstreamID:  resp.DownstreamID,
+			CommandStatus: contract.Executing,
+			Params:        cloneParams(cmd.Params),
+			Attempts:      cmd.Attempts,
+			StartedAt:     sendStart,
+			FinishedAt:    sendEnd,
+			DurationMs:    sendDur,
+		})
+		return true, nil
 
 	case OutcomeCompleted:
 		if err := w.Store.MarkCommandExecuting(ctx, cmd.CommandID, w.WorkerID, now, resp.DownstreamID); err != nil {
 			return true, err
 		}
-		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Completed, "vehicle_confirmed", now)
+		w.emitStage(StageEvent{
+			Stage:         "executor.dispatch",
+			Status:        "done",
+			Scope:         cmd.Scope,
+			Operation:     cmd.Operation,
+			TaskID:        cmd.TaskID,
+			CommandID:     cmd.CommandID,
+			RequestID:     cmd.RequestID,
+			DownstreamID:  resp.DownstreamID,
+			CommandStatus: contract.Executing,
+			Params:        cloneParams(cmd.Params),
+			Attempts:      cmd.Attempts,
+			StartedAt:     sendStart,
+			FinishedAt:    sendEnd,
+			DurationMs:    sendDur,
+		})
+		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Completed, "vehicle_confirmed", "vehicle_confirmed", now)
 
 	case OutcomeRejected:
-		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, resp.Reason, now)
+		w.emitStage(StageEvent{
+			Stage:         "executor.dispatch",
+			Status:        "error",
+			Scope:         cmd.Scope,
+			Operation:     cmd.Operation,
+			TaskID:        cmd.TaskID,
+			CommandID:     cmd.CommandID,
+			RequestID:     cmd.RequestID,
+			DownstreamID:  resp.DownstreamID,
+			CommandStatus: contract.Failed,
+			Params:        cloneParams(cmd.Params),
+			Reason:        resp.Reason,
+			Attempts:      cmd.Attempts,
+			StartedAt:     sendStart,
+			FinishedAt:    sendEnd,
+			DurationMs:    sendDur,
+		})
+		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, resp.Reason, "rejected", now)
 
 	case OutcomeRetryableError:
 		if caps.SupportsIdempotency && (caps.RetryWindow <= 0 || now.Sub(cmd.CreatedAt) < caps.RetryWindow) {
-			return true, w.Store.ReleaseCommandForRetry(ctx, cmd.CommandID, w.WorkerID, now.Add(w.retryBackoff()), resp.Reason)
+			if err := w.Store.ReleaseCommandForRetry(ctx, cmd.CommandID, w.WorkerID, now.Add(w.retryBackoff()), resp.Reason); err != nil {
+				return true, err
+			}
+			w.emitStage(StageEvent{
+				Stage:         "executor.dispatch",
+				Status:        "waiting",
+				Scope:         cmd.Scope,
+				Operation:     cmd.Operation,
+				TaskID:        cmd.TaskID,
+				CommandID:     cmd.CommandID,
+				RequestID:     cmd.RequestID,
+				DownstreamID:  resp.DownstreamID,
+				CommandStatus: contract.PendingDispatch,
+				Params:        cloneParams(cmd.Params),
+				Reason:        resp.Reason,
+				Attempts:      cmd.Attempts,
+				StartedAt:     sendStart,
+				FinishedAt:    sendEnd,
+				DurationMs:    sendDur,
+			})
+			return true, nil
 		}
-		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, "retry window exhausted: "+resp.Reason, now)
+		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, "retry window exhausted: "+resp.Reason, "retry_exhausted", now)
 
 	case OutcomeUncertain:
 		// Delivery outcome is ambiguous: record executing and reconcile FIRST.
 		if err := w.Store.MarkCommandExecuting(ctx, cmd.CommandID, w.WorkerID, now, resp.DownstreamID); err != nil {
 			return true, err
 		}
+		w.emitStage(StageEvent{
+			Stage:         "executor.dispatch",
+			Status:        "waiting",
+			Scope:         cmd.Scope,
+			Operation:     cmd.Operation,
+			TaskID:        cmd.TaskID,
+			CommandID:     cmd.CommandID,
+			RequestID:     cmd.RequestID,
+			DownstreamID:  resp.DownstreamID,
+			CommandStatus: contract.Executing,
+			Params:        cloneParams(cmd.Params),
+			Reason:        resp.Reason,
+			Attempts:      cmd.Attempts,
+			StartedAt:     sendStart,
+			FinishedAt:    sendEnd,
+			DurationMs:    sendDur,
+		})
 		refreshed, err := w.Store.GetCommand(ctx, cmd.CommandID)
 		if err != nil {
 			return true, err
@@ -197,7 +311,7 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 			// If neither query nor telemetry resolved it immediately and channel cannot confirm later, mark result_unknown.
 			after, _ := w.Store.GetCommand(ctx, cmd.CommandID)
 			if after != nil && after.Status == contract.Executing && !caps.SupportsStatusQuery && !caps.SupportsTelemetryConfirm {
-				return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.ResultUnknown, "uncertain delivery without downstream idempotency", now)
+				return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.ResultUnknown, "uncertain delivery without downstream idempotency", "uncertain_delivery", now)
 			}
 			return true, nil
 		}
@@ -205,7 +319,7 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 		return true, w.reconcileCommand(ctx, refreshed, now)
 
 	default:
-		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.ResultUnknown, "unknown send outcome", now)
+		return true, w.finalizeOutcome(ctx, cmd.CommandID, contract.ResultUnknown, "unknown send outcome", "unknown_outcome", now)
 	}
 }
 
@@ -234,13 +348,13 @@ func (w *Worker) reconcileCommand(ctx context.Context, cmd *tasks.OutboxCommand,
 				if ts.IsZero() {
 					ts = now
 				}
-				return w.finalizeOutcome(ctx, cmd.CommandID, contract.Completed, "downstream_query_confirmed", ts)
+				return w.finalizeOutcome(ctx, cmd.CommandID, contract.Completed, "downstream_query_confirmed", "downstream_query", ts)
 			case ReceiptFailed:
 				ts := rec.OccurredAt
 				if ts.IsZero() {
 					ts = now
 				}
-				return w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, rec.Reason, ts)
+				return w.finalizeOutcome(ctx, cmd.CommandID, contract.Failed, rec.Reason, "downstream_query", ts)
 			}
 		}
 	}
@@ -249,7 +363,7 @@ func (w *Worker) reconcileCommand(ctx context.Context, cmd *tasks.OutboxCommand,
 	if caps.SupportsTelemetryConfirm && w.Catalog != nil && cmd.DispatchedAt != nil {
 		conf, err := w.Catalog.ConfirmCommandEffect(ctx, cmd.Scope.VehicleID, cmd.Operation, cmd.Params, *cmd.DispatchedAt, now)
 		if err == nil && conf.Confirmed {
-			return w.finalizeOutcome(ctx, cmd.CommandID, contract.Completed, "target telemetry confirmed", now)
+			return w.finalizeOutcome(ctx, cmd.CommandID, contract.Completed, "target telemetry confirmed", "telemetry", now)
 		}
 	}
 
@@ -259,7 +373,7 @@ func (w *Worker) reconcileCommand(ctx context.Context, cmd *tasks.OutboxCommand,
 		dispatched = *cmd.DispatchedAt
 	}
 	if now.Sub(dispatched) >= w.confirmTimeout() {
-		return w.finalizeOutcome(ctx, cmd.CommandID, contract.ResultUnknown, "confirmation timed out", now)
+		return w.finalizeOutcome(ctx, cmd.CommandID, contract.ResultUnknown, "confirmation timed out", "timeout", now)
 	}
 	return nil
 }
@@ -294,7 +408,24 @@ func (w *Worker) HandleReceipt(ctx context.Context, receipt VehicleReceipt) erro
 		// Acceptance only promotes pending_dispatch -> executing; out-of-order acceptance
 		// arriving after completed/failed is ignored cleanly.
 		if cmd.Status == contract.PendingDispatch {
-			return w.Store.MarkCommandExecuting(ctx, cmdID, "", occurred, receipt.DownstreamID)
+			if err := w.Store.MarkCommandExecuting(ctx, cmdID, "", occurred, receipt.DownstreamID); err != nil {
+				return err
+			}
+			doneAt := time.Now().UTC()
+			w.emitStage(StageEvent{
+				Stage:         "executor.dispatch",
+				Status:        "done",
+				Scope:         cmd.Scope,
+				Operation:     cmd.Operation,
+				TaskID:        cmd.TaskID,
+				CommandID:     cmd.CommandID,
+				RequestID:     cmd.RequestID,
+				DownstreamID:  receipt.DownstreamID,
+				CommandStatus: contract.Executing,
+				Params:        cloneParams(cmd.Params),
+				StartedAt:     doneAt,
+				FinishedAt:    doneAt,
+			})
 		}
 		return nil
 
@@ -331,22 +462,87 @@ func (w *Worker) HandleReceipt(ctx context.Context, receipt VehicleReceipt) erro
 				return err
 			}
 		}
-		return w.finalizeOutcome(ctx, cmdID, next, reason, occurred)
+		return w.finalizeOutcome(ctx, cmdID, next, reason, "receipt", occurred)
 
 	default:
 		return &contract.BusinessError{Code: contract.InvalidArgument, Message: fmt.Sprintf("unknown receipt status %q", receipt.Status)}
 	}
 }
 
-func (w *Worker) finalizeOutcome(ctx context.Context, commandID string, next contract.Status, reason string, occurredAt time.Time) error {
+func (w *Worker) finalizeOutcome(ctx context.Context, commandID string, next contract.Status, reason, method string, occurredAt time.Time) error {
 	applied, ev, err := w.Store.TransitionCommandOutcome(ctx, commandID, next, reason, occurredAt)
 	if err != nil {
 		return err
 	}
-	if applied && ev != nil && w.OnEvent != nil {
-		w.OnEvent(*ev)
+	if applied && ev != nil {
+		if w.OnStage != nil {
+			var (
+				downstreamID string
+				params       map[string]any
+				startedAt    = occurredAt
+			)
+			if cmd, cmdErr := w.Store.GetCommand(ctx, commandID); cmdErr == nil && cmd != nil {
+				downstreamID = cmd.DownstreamID
+				params = cloneParams(cmd.Params)
+				if cmd.DispatchedAt != nil && !cmd.DispatchedAt.IsZero() {
+					startedAt = *cmd.DispatchedAt
+				} else if !cmd.CreatedAt.IsZero() {
+					startedAt = cmd.CreatedAt
+				}
+			}
+			finishedAt := time.Now().UTC()
+			dur := finishedAt.Sub(startedAt).Milliseconds()
+			if dur < 0 {
+				dur = 0
+			}
+			stepStatus := "done"
+			switch ev.Status {
+			case contract.Failed:
+				stepStatus = "error"
+			case contract.ResultUnknown:
+				stepStatus = "waiting"
+			}
+			w.emitStage(StageEvent{
+				Stage:           "executor.receipt",
+				Status:          stepStatus,
+				Scope:           ev.Scope,
+				Operation:       ev.Operation,
+				TaskID:          ev.TaskID,
+				CommandID:       ev.CommandID,
+				RequestID:       ev.RequestID,
+				DownstreamID:    downstreamID,
+				EventID:         ev.EventID,
+				CommandStatus:   ev.Status,
+				Params:          params,
+				Reason:          reason,
+				ReconcileMethod: method,
+				StartedAt:       startedAt,
+				FinishedAt:      finishedAt,
+				DurationMs:      dur,
+			})
+		}
+		if w.OnEvent != nil {
+			w.OnEvent(*ev)
+		}
 	}
 	return nil
+}
+
+func (w *Worker) emitStage(ev StageEvent) {
+	if w.OnStage != nil {
+		w.OnStage(ev)
+	}
+}
+
+func cloneParams(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (w *Worker) leaseTTL() time.Duration {

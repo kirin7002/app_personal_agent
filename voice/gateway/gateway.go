@@ -19,6 +19,28 @@ import (
 	"github.com/kirin7002/app_personal_agent/contract"
 )
 
+// GatewayEvent is an optional read-only observation of voice ASR, routing, and playback stages.
+type GatewayEvent struct {
+	Scope           contract.Scope
+	TurnID          string
+	RequestID       string
+	Stage           string // "voice.asr", "voice.route", "voice.playback"
+	Status          string // "running", "done", "error", "interrupted"
+	StartedAt       time.Time
+	FinishedAt      *time.Time
+	DurationMs      *int64
+	DurationKind    string // "boundary_wait", "measured_local"
+	Transcript      string
+	AudioBytes      int
+	Route           string // "native_s2s" or "vehicle_hermes"
+	PendingCount    int
+	PlaybackID      string
+	PlaybackSource  string // "native", "reply", "result"
+	PlaybackReason  string
+	AudioDurationMs int64
+	ErrorMessage    string
+}
+
 type Gateway struct {
 	Auth    contract.Authenticator
 	Media   contract.S2SFactory
@@ -27,11 +49,18 @@ type Gateway struct {
 	Results contract.ResultReader
 	TTS     contract.SpeechSynthesizer
 	Logger  *slog.Logger
+	OnEvent func(GatewayEvent)
 
 	mu             sync.Mutex
 	sessions       map[contract.Scope]*sessionState
 	nextGeneration atomic.Uint64
 	nextPlayback   atomic.Uint64
+}
+
+func (g *Gateway) emitEvent(ev GatewayEvent) {
+	if g.OnEvent != nil {
+		g.OnEvent(ev)
+	}
 }
 
 type sessionState struct {

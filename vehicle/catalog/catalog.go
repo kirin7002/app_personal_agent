@@ -415,6 +415,47 @@ func (s *Service) ValidateMutation(vehicleID string, op contract.Operation, para
 	return outcome, spec, nil
 }
 
+// CapabilityInfo is a read-only exported view of an enabled capability and its
+// vehicle-specific parameter schema.
+type CapabilityInfo struct {
+	Device       string          `json:"device"`
+	Tool         string          `json:"tool"`
+	MCPTool      string          `json:"mcp_tool"`
+	Description  string          `json:"description"`
+	Aliases      []string        `json:"aliases"`
+	Utterances   []string        `json:"utterances"`
+	ParamsSchema json.RawMessage `json:"params_schema"`
+}
+
+// ListCapabilities returns all enabled capabilities and schemas for vehicleID.
+func (s *Service) ListCapabilities(vehicleID string) []CapabilityInfo {
+	s.mu.RLock()
+	profile, ok := s.profiles[vehicleID]
+	if !ok {
+		profile = DefaultProfile(vehicleID)
+	}
+	specs := s.enabledSpecsLocked(profile)
+	s.mu.RUnlock()
+
+	out := make([]CapabilityInfo, 0, len(specs))
+	for _, sp := range specs {
+		aliases := make([]string, len(sp.Aliases))
+		copy(aliases, sp.Aliases)
+		utterances := make([]string, len(sp.Utterances))
+		copy(utterances, sp.Utterances)
+		out = append(out, CapabilityInfo{
+			Device:       sp.Operation.Device,
+			Tool:         sp.Operation.Tool,
+			MCPTool:      sp.MCPTool,
+			Description:  sp.Description,
+			Aliases:      aliases,
+			Utterances:   utterances,
+			ParamsSchema: sp.ParamsSchemaFor(profile),
+		})
+	}
+	return out
+}
+
 func (s *Service) enabledSpecsLocked(profile VehicleProfile) []OperationSpec {
 	out := make([]OperationSpec, 0, len(s.order))
 	for _, op := range s.order {

@@ -338,3 +338,61 @@ func TestCompletedPlaybackSurvivesGatewayRestart(t *testing.T) {
 		t.Fatalf("acknowledged result replayed after restart: %+v", next)
 	}
 }
+
+func TestGatewayOnEventASRRoutePlayback(t *testing.T) {
+	backend := &fakeBackend{}
+	factory := &fakeFactory{}
+	var (
+		mu     sync.Mutex
+		events []GatewayEvent
+	)
+	gw := &Gateway{
+		Auth: backend, Media: factory, Turns: backend, Pending: backend, Results: backend, TTS: backend,
+		OnEvent: func(ev GatewayEvent) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		},
+	}
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	car, gen := dial(t, ctx, srv)
+	utterance(t, ctx, car, gen, "obs-turn-1", 1)
+	stopFrame := until(t, ctx, car, contract.PlaybackStop)
+	write(t, ctx, car, contract.CarFrame{
+		Type: contract.PlaybackAck, PlaybackID: stopFrame.PlaybackID, PlaybackGeneration: stopFrame.PlaybackGeneration,
+	})
+	_ = car.Close(websocket.StatusNormalClosure, "done")
+
+	mu.Lock()
+	got := append([]GatewayEvent(nil), events...)
+	mu.Unlock()
+
+	var hasASR, hasRoute, hasPlayStart, hasPlayDone bool
+	for _, ev := range got {
+		switch ev.Stage {
+		case "voice.asr":
+			if ev.Status == "done" && ev.Transcript == "把车窗关一下" && ev.AudioBytes == 2 {
+				hasASR = true
+			}
+		case "voice.route":
+			if ev.Status == "done" && ev.Route == "vehicle_hermes" {
+				hasRoute = true
+			}
+		case "voice.playback":
+			if ev.Status == "running" && ev.PlaybackSource == "reply" {
+				hasPlayStart = true
+			}
+			if ev.Status == "done" && ev.PlaybackSource == "reply" && ev.AudioBytes == 2 && ev.PlaybackReason == "completed" {
+				hasPlayDone = true
+			}
+		}
+	}
+	if !hasASR || !hasRoute || !hasPlayStart || !hasPlayDone {
+		t.Fatalf("missing expected gateway observation events (asr=%v route=%v playStart=%v playDone=%v): %+v",
+			hasASR, hasRoute, hasPlayStart, hasPlayDone, got)
+	}
+}
