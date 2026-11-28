@@ -112,7 +112,26 @@ func normalizeSpeechKey(text string) string {
 	return strings.TrimSpace(r.Replace(text))
 }
 
-func (t *qwenReadAloudTTS) nextStyleHint(text string) string {
+var pushyToneKeywords = []string{
+	"快点", "赶紧", "快一点", "怎么这么慢", "好慢", "磨蹭", "墨迹",
+	"听不懂", "听不清吗", "耳朵", "烦死", "真烦", "啰嗦", "废话",
+	"到底行不行", "行不行啊", "搞什么", "干嘛呢", "干什么吃的", "笨", "傻", "有病", "气死", "急死了",
+}
+
+func isPushyOrHarshTone(userText string) bool {
+	trimmed := strings.TrimSpace(userText)
+	if trimmed == "" {
+		return false
+	}
+	for _, kw := range pushyToneKeywords {
+		if strings.Contains(trimmed, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *qwenReadAloudTTS) nextStyleHint(ctx context.Context, text string) string {
 	clock := time.Now
 	if t.now != nil {
 		clock = t.now
@@ -120,6 +139,8 @@ func (t *qwenReadAloudTTS) nextStyleHint(text string) string {
 	now := clock().UTC()
 	cutoff := now.Add(-2 * time.Minute)
 	key := normalizeSpeechKey(text)
+	userText := contract.UserUtteranceFromContext(ctx)
+	pushyTone := isPushyOrHarshTone(userText)
 
 	t.mu.Lock()
 	kept := t.recent[:0]
@@ -141,17 +162,23 @@ func (t *qwenReadAloudTTS) nextStyleHint(text string) string {
 	recentTurns := len(kept)
 	t.mu.Unlock()
 
+	if pushyTone && repeatCount >= 1 {
+		return fmt.Sprintf("【当前语境】用户刚才语气比较冲或催促，而且同类问题已是近期第 %d 次反复触发。请在柔和声线底色上自然流露出明显一点的无奈和不耐烦，轻轻回一句嘴，但依然稳妥准确地把关键事实和结果交代清楚；不要套用固定开头词。", repeatCount+1)
+	}
+	if pushyTone {
+		return "【当前语境】用户刚才说话语气有些催促或不太客气。可以在柔和声线里带出一点点被催烦了的小不耐烦，但保持礼貌克制，依然认认真真把事情办妥并说清事实；不要用固定套话开头。"
+	}
 	if repeatCount >= 1 {
-		return fmt.Sprintf("当前语境：用户近期已多次反复触发同类询问或确认（第 %d 次），请用柔和声线流露出更明显的小不耐烦与轻声吐槽（如“哎呀怎么又问啦”“好啦再跟你说一遍”），但依然认真准确把下面内容说完。", repeatCount+1)
+		return fmt.Sprintf("【当前语境】同类内容在近期已被反复触发（第 %d 次）。可以自然带出一点被问烦了的轻微不耐烦或无奈，但依然保持柔和声线并准确传达全部关键信息；换一种自然说法，不要重复固定开头词。", repeatCount+1)
 	}
-	if recentTurns >= 3 {
-		return fmt.Sprintf("当前语境：你们刚刚已连续沟通了 %d 轮，语气里可以带一点轻微的不耐烦和嫌麻烦（如“行行行”“好啦好啦”），但依然稳妥靠谱地把事情交代清楚。", recentTurns)
+	if recentTurns >= 4 {
+		return fmt.Sprintf("【当前语境】短时间内已经连续来回沟通了 %d 轮，略显折腾。语气里可以带一丝很轻的嫌麻烦感，但依然靠谱、耐心地把关键信息交代清楚；不要用固定口头禅开头。", recentTurns)
 	}
-	return "当前语境：正常轮次，声音柔和自然，语气干脆略带一点点小傲娇和不耐烦，但认真靠谱。"
+	return "【当前语境】普通正常对话。请用柔和、自然、平和干脆的日常口语直接表达重点，不要表现不耐烦，也不要加多余的开头口头禅。"
 }
 
 func (t *qwenReadAloudTTS) Synthesize(ctx context.Context, text string, emit func([]byte) error) error {
-	hint := t.nextStyleHint(text)
+	hint := t.nextStyleHint(ctx, text)
 	emitted := false
 	_, err := t.factory.SpeakWithStyle(ctx, text, hint, func(pcm []byte) error {
 		emitted = true
