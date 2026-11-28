@@ -223,7 +223,14 @@ func (b *EventBus) Publish(scope contract.Scope, eventType string, payload map[s
 	case "process.step":
 		if stepObj, ok := sanitized["step"].(map[string]any); ok {
 			stepID, _ := stepObj["step_id"].(string)
-			key := turnID + "|" + stepID
+			ownerKey := turnID
+			if ownerKey == "" {
+				ownerKey = requestID
+			}
+			if ownerKey == "" {
+				ownerKey, _ = sanitized["command_id"].(string)
+			}
+			key := ownerKey + "|" + stepID
 			if stepID != "" {
 				if _, exists := bucket.stepByKey[key]; !exists {
 					bucket.stepOrder = append(bucket.stepOrder, key)
@@ -1133,9 +1140,21 @@ func (b *EventBus) HandleGatewayEvent(ev gateway.GatewayEvent) {
 	if ev.ErrorMessage != "" {
 		obs["error_message"] = ev.ErrorMessage
 	}
+	turnID := ev.TurnID
+	if turnID == "" {
+		turnID = ev.RequestID
+	}
+	if turnID == "" {
+		turnID = ev.CommandID
+	}
+	if turnID == "" {
+		turnID = ev.PlaybackID
+	}
 	b.Publish(ev.Scope, "process.step", map[string]any{
-		"turn_id":    ev.TurnID,
+		"turn_id":    turnID,
 		"request_id": ev.RequestID,
+		"task_id":    ev.TaskID,
+		"command_id": ev.CommandID,
 		"channel":    "voice",
 		"step": map[string]any{
 			"step_id":       stepID,

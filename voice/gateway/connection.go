@@ -47,6 +47,8 @@ type playback struct {
 	source     string
 	turnID     string
 	requestID  string
+	taskID     string
+	commandID  string
 	generation uint64
 	sequence   uint64
 	audioBytes int
@@ -413,11 +415,11 @@ func (c *connection) onWork(event jobEvent) {
 			c.onWork(jobEvent{job: j, finished: true})
 			return
 		}
-		c.startPlayback("reply-" + j.capture.turnID)
+		c.startPlaybackWithMeta("reply-"+j.capture.turnID, j.capture.turnID, j.capture.requestID, reply.TaskID, reply.CommandID)
 		go c.synthesize(j, reply.Text)
 	case event.playbackID != "":
 		j.nativeReady = true
-		c.startPlayback(event.playbackID)
+		c.startPlaybackWithMeta(event.playbackID, j.capture.turnID, j.capture.requestID, "", "")
 	case event.pcm != nil:
 		c.audio(event.pcm)
 	case event.finished:
@@ -449,9 +451,8 @@ func playbackSource(id string) string {
 	}
 }
 
-func (c *connection) startPlayback(id string) {
-	var turnID, requestID string
-	if c.current != nil {
+func (c *connection) startPlaybackWithMeta(id, turnID, requestID, taskID, commandID string) {
+	if turnID == "" && requestID == "" && c.current != nil {
 		turnID = c.current.capture.turnID
 		requestID = c.current.capture.requestID
 	}
@@ -460,6 +461,8 @@ func (c *connection) startPlayback(id string) {
 		source:     playbackSource(id),
 		turnID:     turnID,
 		requestID:  requestID,
+		taskID:     taskID,
+		commandID:  commandID,
 		generation: c.gateway.nextPlayback.Add(1),
 		started:    time.Now().UTC(),
 	}
@@ -469,6 +472,8 @@ func (c *connection) startPlayback(id string) {
 		Scope:          c.scope,
 		TurnID:         p.turnID,
 		RequestID:      p.requestID,
+		TaskID:         p.taskID,
+		CommandID:      p.commandID,
 		Stage:          "voice.playback",
 		Status:         "running",
 		StartedAt:      p.started,
@@ -510,6 +515,8 @@ func (c *connection) stopPlayback(reason string) {
 			Scope:           c.scope,
 			TurnID:          p.turnID,
 			RequestID:       p.requestID,
+			TaskID:          p.taskID,
+			CommandID:       p.commandID,
 			Stage:           "voice.playback",
 			Status:          status,
 			StartedAt:       p.started,
@@ -619,8 +626,8 @@ func (c *connection) refreshResults(play bool) []contract.VehicleResultEvent {
 			}
 		}
 		c.attempted[id] = true
-		c.startPlayback(id)
-		j := c.newJob("result", capture{})
+		c.startPlaybackWithMeta(id, "", result.RequestID, result.TaskID, result.CommandID)
+		j := c.newJob("result", capture{requestID: result.RequestID})
 		go c.synthesize(j, vehicleResultText(result))
 	}
 	return filtered

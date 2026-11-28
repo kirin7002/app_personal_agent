@@ -188,27 +188,27 @@ function sessionQueryParams(extra = {}) {
 
 // ===== Turn & Step Data Model (Idempotent Merge) =====
 
-function resolveTurnKey({ turn_id, request_id, command_id, task_id, createIfMissing = false, channel = 'text' } = {}) {
-  for (const key of [turn_id, request_id, command_id]) {
+function resolveTurnKey({ turn_id, request_id, command_id, task_id, fallback_key, createIfMissing = false, channel = 'text' } = {}) {
+  for (const key of [turn_id, request_id, command_id, fallback_key]) {
     if (key && state.aliasToTurn.has(key)) {
       const canonical = state.aliasToTurn.get(key);
-      registerTurnAliases(canonical, { turn_id, request_id, command_id });
+      registerTurnAliases(canonical, { turn_id, request_id, command_id, fallback_key });
       return canonical;
     }
   }
-  if (task_id && !turn_id && !request_id) {
+  if (task_id && !turn_id && !request_id && !command_id) {
     // Match the most recent turn referencing this task_id (used for late executor steps).
     for (let i = state.turnOrder.length - 1; i >= 0; i--) {
       const t = state.turns.get(state.turnOrder[i]);
       if (t && t.taskId === task_id) {
-        registerTurnAliases(t.key, { command_id });
+        registerTurnAliases(t.key, { command_id, fallback_key });
         return t.key;
       }
     }
   }
   if (!createIfMissing) return null;
 
-  const key = turn_id || request_id || command_id || `turn-${Date.now()}-${state.turnOrder.length + 1}`;
+  const key = turn_id || request_id || command_id || fallback_key || `turn-${Date.now()}-${state.turnOrder.length + 1}`;
   const turn = {
     key,
     turnId: turn_id || '',
@@ -230,26 +230,31 @@ function resolveTurnKey({ turn_id, request_id, command_id, task_id, createIfMiss
   };
   state.turns.set(key, turn);
   state.turnOrder.push(key);
-  registerTurnAliases(key, { turn_id, request_id, command_id });
+  registerTurnAliases(key, { turn_id, request_id, command_id, fallback_key });
   return key;
 }
 
-function registerTurnAliases(canonical, { turn_id, request_id, command_id } = {}) {
+function registerTurnAliases(canonical, { turn_id, request_id, command_id, fallback_key } = {}) {
   if (canonical) state.aliasToTurn.set(canonical, canonical);
   if (turn_id) state.aliasToTurn.set(turn_id, canonical);
   if (request_id) state.aliasToTurn.set(request_id, canonical);
   if (command_id) state.aliasToTurn.set(command_id, canonical);
+  if (fallback_key && !turn_id && !request_id && !command_id) {
+    state.aliasToTurn.set(fallback_key, canonical);
+  }
 }
 
 function mergeProcessStep(envelope) {
   if (!envelope || !envelope.step) return;
   const step = envelope.step;
   const stepId = step.step_id || `${step.stage || 'step'}:${envelope.seq || Date.now()}`;
+  const hasPrimaryID = Boolean(envelope.turn_id || envelope.request_id || envelope.command_id || envelope.task_id);
   const turnKey = resolveTurnKey({
     turn_id: envelope.turn_id,
     request_id: envelope.request_id,
     command_id: envelope.command_id,
     task_id: envelope.task_id,
+    fallback_key: hasPrimaryID ? '' : `step:${stepId}`,
     channel: envelope.channel || 'text',
     createIfMissing: true,
   });
@@ -301,6 +306,21 @@ function mergeProcessStep(envelope) {
       turn.status =
         replyStatus ||
         (merged.status === 'error' ? 'error' : merged.status === 'interrupted' ? 'interrupted' : 'completed');
+    }
+    if (!turn.assistantTime && merged.finished_at) {
+      turn.assistantTime = merged.finished_at;
+    }
+  }
+
+  // Reconcile turn-level status for native S2S or standalone playback once playback finishes.
+  if (merged.stage === 'voice.playback' && isTerminalStepStatus(merged.status) && turn.status === 'running') {
+    const allTerminal = turn.stepsOrder.every((id) => {
+      const s = turn.steps.get(id);
+      return !s || isTerminalStepStatus(s.status);
+    });
+    if (allTerminal) {
+      turn.status =
+        merged.status === 'error' ? 'error' : merged.status === 'interrupted' ? 'interrupted' : 'completed';
     }
     if (!turn.assistantTime && merged.finished_at) {
       turn.assistantTime = merged.finished_at;
@@ -1220,11 +1240,11 @@ async function refreshState({ quiet = false } = {}) {
   for (const m of Array.isArray(data.messages) ? data.messages : []) {
     mergeMessage(m);
   }
-  for (const s of Array.isArray(data.process_steps) ? data.process_steps : []) {
-    mergeProcessStep(s);
-  }
   for (const r of Array.isArray(data.vehicle_results) ? data.vehicle_results : []) {
     applyVehicleResult(r);
+  }
+  for (const s of Array.isArray(data.process_steps) ? data.process_steps : []) {
+    mergeProcessStep(s);
   }
   renderVehiclePanel();
 

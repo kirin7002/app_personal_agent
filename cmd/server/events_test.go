@@ -18,6 +18,7 @@ import (
 
 	"github.com/kirin7002/app_personal_agent/contract"
 	"github.com/kirin7002/app_personal_agent/vehicle/turns"
+	"github.com/kirin7002/app_personal_agent/voice/gateway"
 )
 
 type parsedSSE struct {
@@ -633,5 +634,59 @@ func TestHandleTurnEventReconcilesOrphanHermesSteps(t *testing.T) {
 		if st["finished_at"] == nil || st["duration_ms"] == nil {
 			t.Fatalf("expected non-nil finished_at & duration_ms for %v: %+v", st["step_id"], st)
 		}
+	}
+}
+
+func TestHandleGatewayEventResultPlaybackCorrelation(t *testing.T) {
+	bus := NewEventBus(32)
+	scope := contract.Scope{UserID: "U1", SessionID: "S4", VehicleID: "sim-car"}
+	started := time.Now().UTC().Add(-760 * time.Millisecond)
+	finished := time.Now().UTC()
+	durMs := int64(761)
+
+	bus.HandleGatewayEvent(gateway.GatewayEvent{
+		Scope:          scope,
+		RequestID:      "web-req-42",
+		TaskID:         "T42",
+		CommandID:      "C42",
+		Stage:          "voice.playback",
+		Status:         "running",
+		StartedAt:      started,
+		DurationKind:   "boundary_wait",
+		PlaybackID:     "result-abc123",
+		PlaybackSource: "result",
+	})
+	bus.HandleGatewayEvent(gateway.GatewayEvent{
+		Scope:           scope,
+		RequestID:       "web-req-42",
+		TaskID:          "T42",
+		CommandID:       "C42",
+		Stage:           "voice.playback",
+		Status:          "done",
+		StartedAt:       started,
+		FinishedAt:      &finished,
+		DurationMs:      &durMs,
+		DurationKind:    "boundary_wait",
+		PlaybackID:      "result-abc123",
+		PlaybackSource:  "result",
+		PlaybackReason:  "completed",
+		AudioBytes:      60000,
+		AudioDurationMs: 1250,
+	})
+
+	_, _, snapSteps := bus.Snapshot(scope)
+	if len(snapSteps) != 1 {
+		t.Fatalf("expected 1 deduplicated playback step, got %d", len(snapSteps))
+	}
+	var env map[string]any
+	if err := json.Unmarshal(snapSteps[0], &env); err != nil {
+		t.Fatal(err)
+	}
+	if env["turn_id"] != "web-req-42" || env["request_id"] != "web-req-42" || env["task_id"] != "T42" || env["command_id"] != "C42" {
+		t.Fatalf("expected non-empty correlation IDs on result playback step, got %+v", env)
+	}
+	st := decodeStepPayload(t, snapSteps[0])
+	if st["status"] != "done" || st["duration_ms"].(float64) != 761 {
+		t.Fatalf("unexpected final step payload: %+v", st)
 	}
 }

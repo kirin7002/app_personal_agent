@@ -452,6 +452,9 @@ export class VehicleVoiceClient {
       }
 
       case 'playback.start': {
+        if (this.currentPlayback && this.currentPlayback.stopReceived && this.currentPlayback.reason === 'completed' && !this.currentPlayback.acked) {
+          this.ackPlayback(this.currentPlayback);
+        }
         this.stopPlayback();
         const id = frame.playback_id || '';
         const gen = Number(frame.playback_generation) || 0;

@@ -396,3 +396,65 @@ func TestGatewayOnEventASRRoutePlayback(t *testing.T) {
 			hasASR, hasRoute, hasPlayStart, hasPlayDone, got)
 	}
 }
+
+func TestGatewayOnEventResultPlaybackCarriesCommandMeta(t *testing.T) {
+	backend := &fakeBackend{
+		results: []contract.VehicleResultEvent{{
+			Scope:      contract.Scope{UserID: "user", SessionID: "session", VehicleID: "car-1"},
+			Operation:  contract.Operation{Device: "window", Tool: "close"},
+			EventID:    "C99:completed",
+			RequestID:  "req-text-99",
+			TaskID:     "T99",
+			CommandID:  "C99",
+			Status:     contract.Completed,
+			OccurredAt: time.Now().UTC(),
+		}},
+	}
+	factory := &fakeFactory{}
+	var (
+		mu     sync.Mutex
+		events []GatewayEvent
+	)
+	gw := &Gateway{
+		Auth: backend, Media: factory, Turns: backend, Pending: backend, Results: backend, TTS: backend,
+		OnEvent: func(ev GatewayEvent) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		},
+	}
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	car, _ := dial(t, ctx, srv)
+	stopFrame := until(t, ctx, car, contract.PlaybackStop)
+	write(t, ctx, car, contract.CarFrame{
+		Type: contract.PlaybackAck, PlaybackID: stopFrame.PlaybackID, PlaybackGeneration: stopFrame.PlaybackGeneration,
+	})
+	_ = car.Close(websocket.StatusNormalClosure, "done")
+
+	mu.Lock()
+	got := append([]GatewayEvent(nil), events...)
+	mu.Unlock()
+
+	var seenRunning, seenDone bool
+	for _, ev := range got {
+		if ev.Stage != "voice.playback" || ev.PlaybackSource != "result" {
+			continue
+		}
+		if ev.RequestID != "req-text-99" || ev.TaskID != "T99" || ev.CommandID != "C99" {
+			t.Fatalf("result playback event missing correlation metadata: %+v", ev)
+		}
+		if ev.Status == "running" {
+			seenRunning = true
+		}
+		if ev.Status == "done" {
+			seenDone = true
+		}
+	}
+	if !seenRunning || !seenDone {
+		t.Fatalf("expected running and done result playback events, got %+v", got)
+	}
+}

@@ -24,6 +24,8 @@ type GatewayEvent struct {
 	Scope           contract.Scope
 	TurnID          string
 	RequestID       string
+	TaskID          string
+	CommandID       string
 	Stage           string // "voice.asr", "voice.route", "voice.playback"
 	Status          string // "running", "done", "error", "interrupted"
 	StartedAt       time.Time
