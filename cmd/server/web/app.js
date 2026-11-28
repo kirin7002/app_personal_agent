@@ -294,6 +294,19 @@ function mergeProcessStep(envelope) {
     turn.userChannel = 'voice';
   }
 
+  // Reconcile turn-level status once turn.reply finishes (including non-task Q&A voice turns).
+  if (merged.stage === 'turn.reply' && isTerminalStepStatus(merged.status)) {
+    if (turn.status === 'running') {
+      const replyStatus = merged.observation?.output?.status;
+      turn.status =
+        replyStatus ||
+        (merged.status === 'error' ? 'error' : merged.status === 'interrupted' ? 'interrupted' : 'completed');
+    }
+    if (!turn.assistantTime && merged.finished_at) {
+      turn.assistantTime = merged.finished_at;
+    }
+  }
+
   renderTurn(turnKey);
 }
 
@@ -326,7 +339,11 @@ function mergeMessage(msg) {
     if (msg.ts || msg.created_at) turn.userTime = msg.ts || msg.created_at;
   } else {
     if (msg.text) turn.assistantText = msg.text;
-    if (msg.status) turn.status = msg.status;
+    if (msg.status) {
+      turn.status = msg.status;
+    } else if (msg.text && turn.status === 'running') {
+      turn.status = 'completed';
+    }
     if (msg.ts || msg.created_at) turn.assistantTime = msg.ts || msg.created_at;
   }
   renderTurn(turnKey);
@@ -481,9 +498,68 @@ function renderTurn(turnKey) {
   if (shouldFollow) scrollChat(true);
 }
 
+function isTerminalStepStatus(status) {
+  return status === 'done' || status === 'error' || status === 'interrupted';
+}
+
 function buildProcessCard(turn) {
-  const steps = turn.stepsOrder.map((id) => turn.steps.get(id)).filter(Boolean);
-  const activeStep = steps.find((s) => s.status === 'running');
+  const rawSteps = turn.stepsOrder.map((id) => turn.steps.get(id)).filter(Boolean);
+  const hermesRunStep = rawSteps.find((s) => s.step_id === 'hermes.run');
+  const turnReplyStep = rawSteps.find((s) => s.stage === 'turn.reply');
+  const hermesRunEnded = Boolean(
+    (hermesRunStep && isTerminalStepStatus(hermesRunStep.status)) ||
+      (turnReplyStep && isTerminalStepStatus(turnReplyStep.status))
+  );
+  const hermesRunEndIso =
+    hermesRunStep?.finished_at || turnReplyStep?.finished_at || turn.assistantTime || null;
+  const hermesRunEndMs = hermesRunEndIso ? Date.parse(hermesRunEndIso) : NaN;
+
+  // Defensively freeze any orphaned Hermes sub-step whose parent hermes.run already ended,
+  // so no stale step can keep timers ticking forever.
+  const steps = rawSteps.map((step) => {
+    const isOrphanHermesSubStep =
+      step.status === 'running' &&
+      typeof step.step_id === 'string' &&
+      step.step_id.startsWith('hermes:') &&
+      hermesRunEnded;
+    if (isOrphanHermesSubStep) {
+      const frozenStatus =
+        hermesRunStep?.status === 'error'
+          ? 'error'
+          : hermesRunStep?.status === 'interrupted'
+            ? 'interrupted'
+            : 'done';
+      const frozenDur =
+        step.duration_ms != null
+          ? step.duration_ms
+          : !Number.isNaN(hermesRunEndMs)
+            ? Math.max(0, hermesRunEndMs - step._startedMs)
+            : 0;
+      return {
+        ...step,
+        status: frozenStatus,
+        finished_at: step.finished_at || hermesRunEndIso,
+        duration_ms: frozenDur,
+        _isLiveRunning: false,
+      };
+    }
+
+    const finishedMs = step.finished_at ? Date.parse(step.finished_at) : NaN;
+    const derivedDur =
+      step.duration_ms != null
+        ? step.duration_ms
+        : !Number.isNaN(finishedMs)
+          ? Math.max(0, finishedMs - step._startedMs)
+          : null;
+    const isLiveRunning = step.status === 'running' && derivedDur == null && !step.finished_at;
+    return {
+      ...step,
+      duration_ms: derivedDur,
+      _isLiveRunning: isLiveRunning,
+    };
+  });
+
+  const activeStep = steps.find((s) => s._isLiveRunning);
   const hasRunning = Boolean(activeStep);
 
   const details = el('details', 'process');
@@ -502,7 +578,10 @@ function buildProcessCard(turn) {
   summary.append(el('span', 'process-title', summaryTitle));
 
   const totalEl = el('span', 'total-time');
-  const firstStart = steps[0]?._startedMs || turn.createdAt;
+  const firstStart = steps.reduce(
+    (acc, s) => (typeof s._startedMs === 'number' && !Number.isNaN(s._startedMs) ? Math.min(acc, s._startedMs) : acc),
+    steps[0]?._startedMs || turn.createdAt
+  );
   if (hasRunning) {
     totalEl.dataset.timerStart = String(firstStart);
     totalEl.textContent = formatDuration(Math.max(0, Date.now() - firstStart));
@@ -564,7 +643,7 @@ function buildProcessCard(turn) {
     const durEl = el('span', 'step-duration');
     if (step.duration_kind === 'instant') {
       durEl.textContent = '—';
-    } else if (step.status === 'running' && step.duration_ms == null) {
+    } else if (step._isLiveRunning) {
       durEl.dataset.timerStart = String(step._startedMs);
       durEl.textContent = formatDuration(Math.max(0, Date.now() - step._startedMs));
     } else {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kirin7002/app_personal_agent/contract"
+	"github.com/kirin7002/app_personal_agent/vehicle/turns"
 )
 
 type parsedSSE struct {
@@ -443,4 +444,194 @@ func postUtteranceRaw(t *testing.T, url, token string, payload map[string]string
 		t.Fatalf("utterance HTTP %d: %s", resp.StatusCode, string(raw))
 	}
 	return string(raw)
+}
+
+func decodeStepPayload(t *testing.T, raw json.RawMessage) map[string]any {
+	t.Helper()
+	var env map[string]any
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	step, ok := env["step"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing step in envelope: %s", string(raw))
+	}
+	return step
+}
+
+func TestHandleHermesStreamEventPairsStartAndCompleteWithCallID(t *testing.T) {
+	bus := NewEventBus(32)
+	scope := contract.Scope{UserID: "U1", SessionID: "S1", VehicleID: "sim-car"}
+	bus.BindRun("run_pair_1", scope, "T1", "R1", "voice")
+
+	_, ch, _, _, cancel := bus.Subscribe(scope, 0)
+	defer cancel()
+
+	bus.HandleHermesStreamEvent("run_pair_1", "tool.started", json.RawMessage(`{
+		"event": "tool.started",
+		"run_id": "run_pair_1",
+		"tool": "mcp__vehicle__search_vehicle_capabilities",
+		"tool_call_id": "toolu_cd4a984901f54c0da93ffc75",
+		"preview": "车控能力 空调 车窗"
+	}`))
+
+	time.Sleep(15 * time.Millisecond)
+
+	bus.HandleHermesStreamEvent("run_pair_1", "tool.completed", json.RawMessage(`{
+		"event": "tool.completed",
+		"run_id": "run_pair_1",
+		"tool": "mcp__vehicle__search_vehicle_capabilities",
+		"tool_call_id": "toolu_cd4a984901f54c0da93ffc75",
+		"duration": 0,
+		"error": false,
+		"preview": ""
+	}`))
+
+	evStart := <-ch
+	evDone := <-ch
+
+	stepStart := decodeStepPayload(t, evStart.Data)
+	stepDone := decodeStepPayload(t, evDone.Data)
+
+	wantStepID := "hermes:tool:toolu_cd4a984901f54c0da93ffc75"
+	if stepStart["step_id"] != wantStepID || stepDone["step_id"] != wantStepID {
+		t.Fatalf("expected identical step_id %q, got start=%v done=%v", wantStepID, stepStart["step_id"], stepDone["step_id"])
+	}
+	if stepStart["status"] != "running" || stepStart["finished_at"] != nil || stepStart["duration_ms"] != nil {
+		t.Fatalf("unexpected start step: %+v", stepStart)
+	}
+	if stepDone["status"] != "done" {
+		t.Fatalf("expected done status, got %+v", stepDone)
+	}
+	if stepDone["started_at"] != stepStart["started_at"] {
+		t.Fatalf("expected started_at preserved: start=%v done=%v", stepStart["started_at"], stepDone["started_at"])
+	}
+	if stepDone["finished_at"] == nil {
+		t.Fatalf("expected non-nil finished_at: %+v", stepDone)
+	}
+	dur, ok := stepDone["duration_ms"].(float64)
+	if !ok || dur < 10 {
+		t.Fatalf("expected measured duration_ms >= 10, got %v (%T)", stepDone["duration_ms"], stepDone["duration_ms"])
+	}
+	obs, _ := stepDone["observation"].(map[string]any)
+	input, _ := obs["input"].(map[string]any)
+	if input["preview"] != "车控能力 空调 车窗" {
+		t.Fatalf("expected input preview preserved in completed observation, got %+v", obs)
+	}
+
+	// Snapshot must deduplicate to 1 completed step with zero running steps left behind.
+	_, _, snapSteps := bus.Snapshot(scope)
+	if len(snapSteps) != 1 {
+		t.Fatalf("expected 1 deduplicated step in snapshot, got %d", len(snapSteps))
+	}
+	finalStep := decodeStepPayload(t, snapSteps[0])
+	if finalStep["status"] != "done" || finalStep["step_id"] != wantStepID {
+		t.Fatalf("unexpected snapshot step: %+v", finalStep)
+	}
+}
+
+func TestHandleHermesStreamEventPairsWithoutCallIDErrorFlagAndSubagent(t *testing.T) {
+	bus := NewEventBus(32)
+	scope := contract.Scope{UserID: "U1", SessionID: "S2", VehicleID: "sim-car"}
+	bus.BindRun("run_fifo_1", scope, "T2", "R2", "text")
+
+	// Two calls to the same tool without call_id -> FIFO pairing, second returns error=true.
+	bus.HandleHermesStreamEvent("run_fifo_1", "tool.started", json.RawMessage(`{"tool":"mcp__vehicle__get_vehicle_status"}`))
+	bus.HandleHermesStreamEvent("run_fifo_1", "tool.started", json.RawMessage(`{"tool":"mcp__vehicle__get_vehicle_status"}`))
+	bus.HandleHermesStreamEvent("run_fifo_1", "tool.completed", json.RawMessage(`{"tool":"mcp__vehicle__get_vehicle_status","error":false}`))
+	bus.HandleHermesStreamEvent("run_fifo_1", "tool.completed", json.RawMessage(`{"tool":"mcp__vehicle__get_vehicle_status","error":true}`))
+
+	// Subagent lifecycle uses Hermes's actual event names: subagent.start -> subagent.complete.
+	bus.HandleHermesStreamEvent("run_fifo_1", "subagent.start", json.RawMessage(`{"name":"researcher"}`))
+	bus.HandleHermesStreamEvent("run_fifo_1", "subagent.complete", json.RawMessage(`{"name":"researcher"}`))
+
+	_, _, snapSteps := bus.Snapshot(scope)
+	if len(snapSteps) != 3 {
+		t.Fatalf("expected 3 deduplicated steps (2 tools + 1 subagent), got %d", len(snapSteps))
+	}
+
+	s0 := decodeStepPayload(t, snapSteps[0])
+	s1 := decodeStepPayload(t, snapSteps[1])
+	s2 := decodeStepPayload(t, snapSteps[2])
+
+	if s0["status"] != "done" || s0["duration_ms"] == nil {
+		t.Fatalf("expected first tool done with duration_ms, got %+v", s0)
+	}
+	if s1["status"] != "error" || s1["duration_ms"] == nil {
+		t.Fatalf("expected second tool error with duration_ms, got %+v", s1)
+	}
+	if s0["step_id"] == s1["step_id"] {
+		t.Fatalf("expected distinct step_ids for two calls, got %v", s0["step_id"])
+	}
+	if s2["status"] != "done" || s2["duration_ms"] == nil || !strings.HasPrefix(s2["step_id"].(string), "hermes:subagent:") {
+		t.Fatalf("expected subagent step done with hermes:subagent: prefix, got %+v", s2)
+	}
+}
+
+func TestHandleTurnEventReconcilesOrphanHermesSteps(t *testing.T) {
+	bus := NewEventBus(32)
+	scope := contract.Scope{UserID: "U1", SessionID: "S3", VehicleID: "sim-car"}
+	runID := "run_orphan_1"
+	started := time.Now().UTC().Add(-50 * time.Millisecond)
+
+	bus.HandleTurnEvent(turns.TurnEvent{
+		Scope:        scope,
+		TurnID:       "T3",
+		RequestID:    "R3",
+		RunID:        runID,
+		Channel:      "voice",
+		StepID:       "hermes.run",
+		Stage:        "hermes.run",
+		Title:        "Hermes 意图理解与编排",
+		Status:       "running",
+		StartedAt:    started,
+		DurationKind: "boundary_wait",
+	})
+
+	// Tool started, but tool.completed is dropped/never arrives.
+	bus.HandleHermesStreamEvent(runID, "tool.started", json.RawMessage(`{
+		"tool": "mcp__vehicle__search_vehicle_capabilities",
+		"tool_call_id": "toolu_orphan_1",
+		"preview": "空调"
+	}`))
+
+	time.Sleep(15 * time.Millisecond)
+	finished := time.Now().UTC()
+	durMs := finished.Sub(started).Milliseconds()
+	bus.HandleTurnEvent(turns.TurnEvent{
+		Scope:        scope,
+		TurnID:       "T3",
+		RequestID:    "R3",
+		RunID:        runID,
+		Channel:      "voice",
+		StepID:       "hermes.run",
+		Stage:        "hermes.run",
+		Title:        "Hermes 意图理解与编排",
+		Status:       "done",
+		RunStatus:    "completed",
+		StartedAt:    started,
+		FinishedAt:   &finished,
+		DurationMs:   &durMs,
+		DurationKind: "boundary_wait",
+	})
+
+	// Late tool.started arriving after hermes.run already closed must also not stick in running.
+	bus.HandleHermesStreamEvent(runID, "tool.started", json.RawMessage(`{
+		"tool": "mcp__vehicle__get_vehicle_status",
+		"tool_call_id": "toolu_late_1"
+	}`))
+
+	_, _, snapSteps := bus.Snapshot(scope)
+	if len(snapSteps) != 3 {
+		t.Fatalf("expected 3 steps (hermes.run + orphan + late), got %d", len(snapSteps))
+	}
+	for _, raw := range snapSteps {
+		st := decodeStepPayload(t, raw)
+		if st["status"] == "running" {
+			t.Fatalf("found stuck running step after hermes.run finished: %+v", st)
+		}
+		if st["finished_at"] == nil || st["duration_ms"] == nil {
+			t.Fatalf("expected non-nil finished_at & duration_ms for %v: %+v", st["step_id"], st)
+		}
+	}
 }
