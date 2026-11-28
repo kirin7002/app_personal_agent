@@ -470,9 +470,6 @@ export class VehicleVoiceClient {
           acked: false,
         };
         this.currentPlayback = pb;
-        if (!skip && pb.mode === 'buffering' && this.wavCoalesceMs > 0) {
-          pb.streamTimer = setTimeout(() => this.switchPlaybackToStream(pb), this.wavCoalesceMs);
-        }
         break;
       }
 
@@ -493,6 +490,11 @@ export class VehicleVoiceClient {
 
         if (pb.mode === 'buffering') {
           pb.chunks.push(pcmBytes);
+          // Arm the streaming fallback timer only after the first PCM chunk arrives,
+          // so server-side TTS synthesis latency never triggers premature switching.
+          if (!pb.streamTimer && this.wavCoalesceMs > 0) {
+            pb.streamTimer = setTimeout(() => this.switchPlaybackToStream(pb), this.wavCoalesceMs);
+          }
         } else if (pb.mode === 'stream') {
           this.enqueue24kPCMBytes(pcmBytes, pb);
         }

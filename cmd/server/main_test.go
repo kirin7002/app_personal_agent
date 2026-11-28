@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kirin7002/app_personal_agent/contract"
+	"github.com/kirin7002/app_personal_agent/realtime/qwen"
 )
 
 func TestDemoServerTextTwoTurnEndToEnd(t *testing.T) {
@@ -696,4 +697,47 @@ func TestWebDemoCookieSessionAPIStateCapabilitiesAndStaticHosting(t *testing.T) 
 		t.Fatalf("unexpected /api/state after receipt: %+v", state2)
 	}
 	sseCancel()
+}
+
+func TestSelectDemoTTSPrefersQwenAndEscalatesRepeatHint(t *testing.T) {
+	factory, err := qwen.New(qwen.Config{APIKey: "mock-key"})
+	if err != nil {
+		t.Fatalf("qwen.New: %v", err)
+	}
+	if factory.Voice() != qwen.DefaultVoice {
+		t.Fatalf("expected default voice %q, got %q", qwen.DefaultVoice, factory.Voice())
+	}
+
+	synth, backend, err := selectDemoTTS("auto", factory)
+	if err != nil || backend != "qwen" {
+		t.Fatalf("expected auto mode with qwenFactory to select qwen, got backend=%q err=%v", backend, err)
+	}
+	qtts, ok := synth.(*qwenReadAloudTTS)
+	if !ok {
+		t.Fatalf("expected *qwenReadAloudTTS, got %T", synth)
+	}
+
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	qtts.now = func() time.Time { return now }
+
+	h1 := qtts.nextStyleHint("要打开哪扇车窗？")
+	if !strings.Contains(h1, "正常轮次") {
+		t.Fatalf("expected normal turn hint on first call, got %q", h1)
+	}
+	now = now.Add(15 * time.Second)
+	h2 := qtts.nextStyleHint("要打开哪扇车窗？")
+	if !strings.Contains(h2, "反复") || !strings.Contains(h2, "第 2 次") {
+		t.Fatalf("expected escalated repeat hint on duplicate call, got %q", h2)
+	}
+	now = now.Add(15 * time.Second)
+	h3 := qtts.nextStyleHint("请确认空调温度。")
+	if !strings.Contains(h3, "连续沟通了 3 轮") {
+		t.Fatalf("expected multi-turn hint on 3rd consecutive call, got %q", h3)
+	}
+
+	// Verify auto mode falls back locally when qwenFactory is nil.
+	_, fallbackBackend, err := selectDemoTTS("auto", nil)
+	if err != nil || (fallbackBackend != "say" && fallbackBackend != "tone") {
+		t.Fatalf("expected local fallback when qwenFactory is nil, got %q err=%v", fallbackBackend, err)
+	}
 }

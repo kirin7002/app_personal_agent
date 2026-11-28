@@ -52,9 +52,11 @@ type config struct {
 	DashScopeAPIKey  string
 	DashScopeRegion  string
 	DashScopeSpaceID string
-	DashScopeModel      string
-	DashScopeVoice      string
-	DebugEndpoints      bool
+	DashScopeModel        string
+	DashScopeVoice        string
+	DashScopeChatPrompt   string
+	DashScopeTTSPrompt    string
+	DebugEndpoints        bool
 	WebDir              string
 	RequireSessionToken bool
 }
@@ -98,7 +100,9 @@ func parseConfig() config {
 	flag.StringVar(&cfg.DashScopeRegion, "dashscope-region", envOr("DASHSCOPE_REGION", "cn-beijing"), "Bailian DashScope region")
 	flag.StringVar(&cfg.DashScopeSpaceID, "dashscope-workspace", strings.TrimSpace(os.Getenv("DASHSCOPE_WORKSPACE_ID")), "Optional Bailian workspace ID")
 	flag.StringVar(&cfg.DashScopeModel, "dashscope-model", strings.TrimSpace(os.Getenv("DASHSCOPE_MODEL")), "Optional Qwen Realtime model override")
-	flag.StringVar(&cfg.DashScopeVoice, "dashscope-voice", strings.TrimSpace(os.Getenv("DASHSCOPE_VOICE")), "Optional Qwen Realtime voice override")
+	flag.StringVar(&cfg.DashScopeVoice, "dashscope-voice", envOr("DASHSCOPE_VOICE", qwen.DefaultVoice), "Optional Qwen Realtime voice override")
+	flag.StringVar(&cfg.DashScopeChatPrompt, "dashscope-chat-prompt", envOr("DASHSCOPE_S2S_INSTRUCTIONS", qwen.DefaultChatInstructions), "Optional Qwen S2S native chat persona instructions")
+	flag.StringVar(&cfg.DashScopeTTSPrompt, "dashscope-tts-prompt", envOr("DASHSCOPE_TTS_INSTRUCTIONS", qwen.DefaultReadAloudInstructions), "Optional Qwen S2S styled read-aloud persona instructions")
 	flag.BoolVar(&cfg.DebugEndpoints, "debug", envBool("DEBUG_ENDPOINTS", true), "Expose /debug/state and /debug/receipt behind DEMO_AUTH_TOKEN")
 	flag.StringVar(&cfg.WebDir, "web-dir", strings.TrimSpace(os.Getenv("WEB_DIR")), "Optional local directory overriding embedded cmd/server/web static assets")
 	flag.BoolVar(&cfg.RequireSessionToken, "require-session-token", envBool("DEMO_REQUIRE_SESSION_TOKEN", false), "Require token/Bearer on POST /api/session before issuing browser Cookie")
@@ -303,11 +307,13 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 	)
 	if cfg.DashScopeAPIKey != "" {
 		qwenFactory, err = qwen.New(qwen.Config{
-			APIKey:      cfg.DashScopeAPIKey,
-			WorkspaceID: cfg.DashScopeSpaceID,
-			Region:      cfg.DashScopeRegion,
-			Model:       cfg.DashScopeModel,
-			Voice:       cfg.DashScopeVoice,
+			APIKey:                cfg.DashScopeAPIKey,
+			WorkspaceID:           cfg.DashScopeSpaceID,
+			Region:                cfg.DashScopeRegion,
+			Model:                 cfg.DashScopeModel,
+			Voice:                 cfg.DashScopeVoice,
+			Instructions:          cfg.DashScopeChatPrompt,
+			ReadAloudInstructions: cfg.DashScopeTTSPrompt,
 		})
 		if err != nil {
 			_ = db.Close()

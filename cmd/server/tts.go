@@ -12,20 +12,30 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kirin7002/app_personal_agent/contract"
 	"github.com/kirin7002/app_personal_agent/realtime/qwen"
 )
 
+func selectLocalFallbackTTS() (contract.SpeechSynthesizer, string) {
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("say"); err == nil {
+			return macSayTTS{voice: "Tingting"}, "say"
+		}
+	}
+	return toneTTS{}, "tone"
+}
+
 func selectDemoTTS(mode string, qwenFactory *qwen.Factory) (contract.SpeechSynthesizer, string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "auto":
-		if runtime.GOOS == "darwin" {
-			if _, err := exec.LookPath("say"); err == nil {
-				return macSayTTS{voice: "Tingting"}, "say", nil
-			}
+		fallback, fallbackName := selectLocalFallbackTTS()
+		if qwenFactory != nil {
+			return newQwenReadAloudTTS(qwenFactory, fallback), "qwen", nil
 		}
-		return toneTTS{}, "tone", nil
+		return fallback, fallbackName, nil
 	case "say":
 		if _, err := exec.LookPath("say"); err != nil {
 			return nil, "", errors.New("TTS_MODE=say requires the macOS 'say' command")
@@ -35,7 +45,8 @@ func selectDemoTTS(mode string, qwenFactory *qwen.Factory) (contract.SpeechSynth
 		if qwenFactory == nil {
 			return nil, "", errors.New("TTS_MODE=qwen requires DASHSCOPE_API_KEY")
 		}
-		return qwenReadAloudTTS{factory: qwenFactory}, "qwen", nil
+		fallback, _ := selectLocalFallbackTTS()
+		return newQwenReadAloudTTS(qwenFactory, fallback), "qwen", nil
 	case "tone":
 		return toneTTS{}, "tone", nil
 	default:
@@ -74,12 +85,81 @@ func (t macSayTTS) Synthesize(ctx context.Context, text string, emit func([]byte
 	return emitPCMChunks(pcm, 4800, emit)
 }
 
-type qwenReadAloudTTS struct {
-	factory *qwen.Factory
+type recentSpeechEntry struct {
+	key string
+	at  time.Time
 }
 
-func (t qwenReadAloudTTS) Synthesize(ctx context.Context, text string, emit func([]byte) error) error {
-	_, err := t.factory.ProbeReadAloud(ctx, text, emit)
+type qwenReadAloudTTS struct {
+	factory  *qwen.Factory
+	fallback contract.SpeechSynthesizer
+	now      func() time.Time
+
+	mu     sync.Mutex
+	recent []recentSpeechEntry
+}
+
+func newQwenReadAloudTTS(factory *qwen.Factory, fallback contract.SpeechSynthesizer) *qwenReadAloudTTS {
+	return &qwenReadAloudTTS{
+		factory:  factory,
+		fallback: fallback,
+		now:      time.Now,
+	}
+}
+
+func normalizeSpeechKey(text string) string {
+	r := strings.NewReplacer(" ", "", "\n", "", "\t", "", "。", "", "，", "", "？", "", "！", "", "?", "", "!", "", "：", "", ":", "")
+	return strings.TrimSpace(r.Replace(text))
+}
+
+func (t *qwenReadAloudTTS) nextStyleHint(text string) string {
+	clock := time.Now
+	if t.now != nil {
+		clock = t.now
+	}
+	now := clock().UTC()
+	cutoff := now.Add(-2 * time.Minute)
+	key := normalizeSpeechKey(text)
+
+	t.mu.Lock()
+	kept := t.recent[:0]
+	repeatCount := 0
+	for _, entry := range t.recent {
+		if entry.at.Before(cutoff) {
+			continue
+		}
+		kept = append(kept, entry)
+		if key != "" && entry.key == key {
+			repeatCount++
+		}
+	}
+	kept = append(kept, recentSpeechEntry{key: key, at: now})
+	if len(kept) > 16 {
+		kept = kept[len(kept)-16:]
+	}
+	t.recent = kept
+	recentTurns := len(kept)
+	t.mu.Unlock()
+
+	if repeatCount >= 1 {
+		return fmt.Sprintf("当前语境：用户近期已多次反复触发同类询问或确认（第 %d 次），请用柔和声线流露出更明显的小不耐烦与轻声吐槽（如“哎呀怎么又问啦”“好啦再跟你说一遍”），但依然认真准确把下面内容说完。", repeatCount+1)
+	}
+	if recentTurns >= 3 {
+		return fmt.Sprintf("当前语境：你们刚刚已连续沟通了 %d 轮，语气里可以带一点轻微的不耐烦和嫌麻烦（如“行行行”“好啦好啦”），但依然稳妥靠谱地把事情交代清楚。", recentTurns)
+	}
+	return "当前语境：正常轮次，声音柔和自然，语气干脆略带一点点小傲娇和不耐烦，但认真靠谱。"
+}
+
+func (t *qwenReadAloudTTS) Synthesize(ctx context.Context, text string, emit func([]byte) error) error {
+	hint := t.nextStyleHint(text)
+	emitted := false
+	_, err := t.factory.SpeakWithStyle(ctx, text, hint, func(pcm []byte) error {
+		emitted = true
+		return emit(pcm)
+	})
+	if err != nil && !emitted && t.fallback != nil {
+		return t.fallback.Synthesize(ctx, text, emit)
+	}
 	return err
 }
 
