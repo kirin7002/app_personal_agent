@@ -249,3 +249,72 @@ func TestProbeReadAloudUsesMatchingResponse(t *testing.T) {
 		t.Fatalf("unexpected read-aloud result transcript=%q audio=%v err=%v", spoken, received, err)
 	}
 }
+
+func TestSpeakWithStyleSendsVoicePersonaAndChunksLargePCM(t *testing.T) {
+	const text = "要打开哪扇车窗？"
+	const repeatHint = "当前语境：用户反复询问（第 2 次）"
+	var (
+		gotVoice        string
+		gotInstructions string
+	)
+	largePCM := make([]byte, 20000)
+	for i := 0; i < len(largePCM); i += 2 {
+		largePCM[i] = 0x34
+		largePCM[i+1] = 0x12
+	}
+
+	factory := newFake(t, time.Second, func(ctx context.Context, c *websocket.Conn) {
+		id := map[string]any{"session": map[string]string{"id": "mock-style"}}
+		if !send(t, ctx, c, "session.created", id) {
+			return
+		}
+		setup := expect(t, ctx, c, "session.update")
+		if setup == nil {
+			return
+		}
+		cfg, _ := setup["session"].(map[string]any)
+		gotVoice, _ = cfg["voice"].(string)
+		gotInstructions, _ = cfg["instructions"].(string)
+		if !send(t, ctx, c, "session.updated", id) {
+			return
+		}
+		if expect(t, ctx, c, "conversation.item.create") == nil ||
+			!send(t, ctx, c, "conversation.item.created", map[string]any{"item": map[string]string{"id": "in"}}) ||
+			expect(t, ctx, c, "response.create") == nil {
+			return
+		}
+		send(t, ctx, c, "response.created", map[string]any{"response": map[string]string{"id": "sp1"}})
+		send(t, ctx, c, "response.audio.delta", map[string]any{"response_id": "sp1", "delta": largePCM})
+		send(t, ctx, c, "response.audio_transcript.done", map[string]any{"response_id": "sp1", "transcript": "好啦好啦，到底要开哪扇窗呀？"})
+		send(t, ctx, c, "response.done", map[string]any{"response": map[string]string{"id": "sp1", "status": "completed"}})
+	})
+	factory.config.Voice = "anruorou_v3.1"
+
+	var (
+		chunkCount int
+		totalBytes int
+	)
+	spoken, err := factory.SpeakWithStyle(context.Background(), text, repeatHint, func(pcm []byte) error {
+		chunkCount++
+		if len(pcm) > 16384 || len(pcm)%2 != 0 {
+			t.Errorf("unexpected chunk size %d", len(pcm))
+		}
+		totalBytes += len(pcm)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SpeakWithStyle: %v", err)
+	}
+	if gotVoice != "anruorou_v3.1" {
+		t.Fatalf("expected voice anruorou_v3.1, got %q", gotVoice)
+	}
+	if !strings.Contains(gotInstructions, "不耐烦") || !strings.Contains(gotInstructions, repeatHint) {
+		t.Fatalf("expected persona and repeat hint in instructions, got %q", gotInstructions)
+	}
+	if chunkCount != 2 || totalBytes != len(largePCM) {
+		t.Fatalf("expected 2 chunks totaling %d bytes, got %d chunks / %d bytes", len(largePCM), chunkCount, totalBytes)
+	}
+	if spoken == "" {
+		t.Fatal("expected non-empty spoken transcript")
+	}
+}
