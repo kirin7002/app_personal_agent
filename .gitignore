@@ -1,0 +1,9 @@
+# Runtime & Demo artifacts
+.runtime/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+*.pcm
+*.wav
