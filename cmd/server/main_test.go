@@ -720,19 +720,33 @@ func TestSelectDemoTTSPrefersQwenAndEscalatesRepeatHint(t *testing.T) {
 	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	qtts.now = func() time.Time { return now }
 
-	h1 := qtts.nextStyleHint("要打开哪扇车窗？")
-	if !strings.Contains(h1, "正常轮次") {
-		t.Fatalf("expected normal turn hint on first call, got %q", h1)
+	// 1. Normal polite turn -> calm & warm, explicitly NOT impatient.
+	ctxPolite := contract.WithUserUtterance(context.Background(), "帮我把车窗开一下")
+	h1 := qtts.nextStyleHint(ctxPolite, "要打开哪扇车窗？")
+	if !strings.Contains(h1, "普通正常对话") || !strings.Contains(h1, "不要表现不耐烦") {
+		t.Fatalf("expected calm normal turn hint on first call, got %q", h1)
 	}
+
+	// 2. Repeated same question -> subtle impatience escalated.
 	now = now.Add(15 * time.Second)
-	h2 := qtts.nextStyleHint("要打开哪扇车窗？")
-	if !strings.Contains(h2, "反复") || !strings.Contains(h2, "第 2 次") {
+	h2 := qtts.nextStyleHint(ctxPolite, "要打开哪扇车窗？")
+	if !strings.Contains(h2, "反复触发") || !strings.Contains(h2, "第 2 次") {
 		t.Fatalf("expected escalated repeat hint on duplicate call, got %q", h2)
 	}
+
+	// 3. Pushy/impatient user tone -> triggers tone-aware subtle impatience.
 	now = now.Add(15 * time.Second)
-	h3 := qtts.nextStyleHint("请确认空调温度。")
-	if !strings.Contains(h3, "连续沟通了 3 轮") {
-		t.Fatalf("expected multi-turn hint on 3rd consecutive call, got %q", h3)
+	ctxPushy := contract.WithUserUtterance(context.Background(), "快点把空调打开，怎么这么慢")
+	h3 := qtts.nextStyleHint(ctxPushy, "空调要调到几度？")
+	if !strings.Contains(h3, "催促或不太客气") {
+		t.Fatalf("expected pushy-tone hint, got %q", h3)
+	}
+
+	// 4. 4th consecutive turn in short window -> mild back-and-forth fatigue cue.
+	now = now.Add(15 * time.Second)
+	h4 := qtts.nextStyleHint(ctxPolite, "车辆已确认执行完成。")
+	if !strings.Contains(h4, "连续来回沟通了 4 轮") {
+		t.Fatalf("expected multi-turn hint on 4th consecutive call, got %q", h4)
 	}
 
 	// Verify auto mode falls back locally when qwenFactory is nil.

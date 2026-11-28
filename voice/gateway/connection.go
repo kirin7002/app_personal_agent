@@ -27,6 +27,7 @@ type job struct {
 	cancel      context.CancelFunc
 	kind        string
 	capture     capture
+	userText    string
 	nativeReady bool
 }
 
@@ -367,7 +368,7 @@ func (c *connection) native(j *job, media contract.S2SSession, itemID string) {
 }
 
 func (c *connection) synthesize(j *job, text string) {
-	ctx, stop := context.WithTimeout(j.ctx, 30*time.Second)
+	ctx, stop := context.WithTimeout(contract.WithUserUtterance(j.ctx, j.userText), 30*time.Second)
 	defer stop()
 	err := c.gateway.TTS.Synthesize(ctx, text, func(pcm []byte) error {
 		if len(pcm) == 0 || len(pcm)%2 != 0 || len(pcm) > 64<<10 {
@@ -400,6 +401,7 @@ func (c *connection) onWork(event jobEvent) {
 			return
 		}
 		c.items[item] = true
+		j.userText = event.transcript.Text
 		j.kind = "route"
 		go c.route(j, *event.transcript)
 	case event.reply != nil:

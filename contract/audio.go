@@ -81,6 +81,27 @@ type SpeechSynthesizer interface {
 	Synthesize(ctx context.Context, text string, emit func([]byte) error) error
 }
 
+type userUtteranceCtxKey struct{}
+
+// WithUserUtterance attaches the triggering user's latest transcript onto ctx
+// so downstream S2S/TTS renderers can adapt tone naturally without altering
+// the SpeechSynthesizer interface.
+func WithUserUtterance(ctx context.Context, text string) context.Context {
+	if text == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, userUtteranceCtxKey{}, text)
+}
+
+// UserUtteranceFromContext retrieves the triggering user's transcript if present.
+func UserUtteranceFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(userUtteranceCtxKey{}).(string)
+	return v
+}
+
 // ResultPlaybackReceipts persists completed or dismissed result playback across
 // gateway restarts. A ResultReader can also implement this interface.
 type ResultPlaybackReceipts interface {

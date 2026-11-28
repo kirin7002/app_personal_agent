@@ -33,7 +33,7 @@ func (f *Factory) SpeakWithStyle(ctx context.Context, text, styleHint string, em
 	if hint := strings.TrimSpace(styleHint); hint != "" {
 		instructions += "\n" + hint
 	}
-	prompt := "请按你的性格和播报规则，用柔和自然、带点小不耐烦但靠谱的口语播报以下【权威内容】，绝对不要改动关键事实与状态：\n" + text
+	prompt := "请严格按照【当前语境】与播报规则，用自然流畅的中文口语播报以下【权威内容】，不要遗漏或改动关键事实与状态：\n" + text
 	return f.speak(ctx, instructions, prompt, emit)
 }
 
