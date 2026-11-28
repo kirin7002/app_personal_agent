@@ -399,10 +399,15 @@ func postUtterance(t *testing.T, handler http.Handler, sessionID, vehicleID, req
 	if rr.Code != http.StatusOK {
 		t.Fatalf("POST /voice/utterances status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	var currentEvent string
 	for _, line := range strings.Split(rr.Body.String(), "\n") {
-		if strings.HasPrefix(line, "data: ") {
+		if ev, ok := strings.CutPrefix(line, "event: "); ok {
+			currentEvent = strings.TrimSpace(ev)
+			continue
+		}
+		if data, ok := strings.CutPrefix(line, "data: "); ok && (currentEvent == "" || currentEvent == "speech.reply") {
 			var reply contract.SpeechReply
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &reply); err != nil {
+			if err := json.Unmarshal([]byte(data), &reply); err != nil {
 				t.Fatalf("decode speech.reply: %v line=%s", err, line)
 			}
 			return reply

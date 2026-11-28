@@ -138,6 +138,7 @@ type demoApp struct {
 	channel       *executor.SimulatedChannel
 	worker        *executor.Worker
 	expiryWorker  *tasks.ExpiryWorker
+	events        *EventBus
 	publicHandler http.Handler
 	mcpHandler    http.Handler
 	voiceEnabled  bool
@@ -209,12 +210,16 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 		taskStore = tasks.NewSQLiteStore(db, validator)
 	}
 
+	eventBus := NewEventBus(defaultEventRingCapacity)
+	eventBus.AddSecrets(cfg.HermesAPIKey, cfg.MCPServiceToken, cfg.DemoAuthToken, cfg.DashScopeAPIKey, cfg.MySQLDSN)
+
 	hermesClient, err := runs.New(cfg.HermesURL, cfg.HermesAPIKey, nil)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init hermes runs client: %w", err)
 	}
 	hermesClient.RetryAdmission = true
+	hermesClient.OnStreamEvent = eventBus.HandleHermesStreamEvent
 
 	turnService := &turns.Service{
 		Store:          turnStore,
@@ -224,6 +229,7 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 		Runs:           hermesClient,
 		Instructions:   string(promptBytes),
 		RetryAdmission: true,
+		OnEvent:        eventBus.HandleTurnEvent,
 	}
 
 	mcpServer := mcp.NewServer(mcp.Config{
@@ -232,12 +238,30 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 		Turns:        turnStore,
 		Tasks:        taskStore,
 		Catalog:      cat,
+		OnToolCall:   eventBus.HandleMCPToolEvent,
 	})
 
 	channel := executor.NewSimulatedChannel(telemetry)
 	channel.Mode = simMode
 
+	publishTelemetrySnapshot := func(primaryScope contract.Scope, vehicleID string) {
+		signals, err := telemetry.ReadSignals(context.Background(), vehicleID, demoSignalNames)
+		if err != nil {
+			return
+		}
+		payload := make(map[string]any, len(signals))
+		for name, pt := range signals {
+			payload[name] = map[string]any{
+				"Value":     pt.Value,
+				"SampledAt": pt.SampledAt,
+				"Available": pt.Available,
+			}
+		}
+		eventBus.PublishVehicleTelemetry(primaryScope, vehicleID, payload)
+	}
+
 	worker := executor.NewWorker("demo-"+rand.Text()[:8], taskStore, cat, channel)
+	worker.OnStage = eventBus.HandleExecutorStage
 	worker.OnEvent = func(ev contract.VehicleResultEvent) {
 		logger.Info("vehicle result emitted",
 			"event_id", ev.EventID,
@@ -248,6 +272,10 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 			"device", ev.Device,
 			"tool", ev.Tool,
 		)
+		eventBus.HandleVehicleResult(ev)
+		if ev.Status == contract.Completed {
+			publishTelemetrySnapshot(ev.Scope, ev.Scope.VehicleID)
+		}
 	}
 
 	expiryWorker := &tasks.ExpiryWorker{
@@ -301,13 +329,20 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 		channel:      channel,
 		worker:       worker,
 		expiryWorker: expiryWorker,
+		events:       eventBus,
 		voiceEnabled: voiceEnabled,
 		ttsBackend:   ttsBackend,
 	}
 
 	pubMux := http.NewServeMux()
 	pubMux.HandleFunc("/healthz", app.handleHealth)
-	pubMux.Handle("/voice/utterances", turns.UtteranceHandler(turnService, auth))
+	pubMux.HandleFunc("/api/events/stream", app.handleEventsStream)
+	pubMux.Handle("/voice/utterances", turns.UtteranceHandlerWithOptions(turnService, auth, turns.UtteranceOptions{
+		OnUtteranceAccepted: func(scope contract.Scope, turnID, requestID, text string) {
+			eventBus.PublishUserMessage(scope, turnID, requestID, "text", text)
+		},
+		SubscribeSteps: eventBus.SubscribeRequestSteps,
+	}))
 	if voiceEnabled {
 		gw := &gateway.Gateway{
 			Auth:    auth,
@@ -317,6 +352,7 @@ func buildApp(ctx context.Context, cfg config, logger *slog.Logger) (*demoApp, e
 			Results: taskStore,
 			TTS:     tts,
 			Logger:  logger,
+			OnEvent: eventBus.HandleGatewayEvent,
 		}
 		pubMux.Handle("/voice/audio", gw)
 	} else {
@@ -395,6 +431,27 @@ var demoSignalNames = []string{
 	"window.rear_right",
 	"hvac.power",
 	"hvac.temperature_c",
+}
+
+func (a *demoApp) handleEventsStream(w http.ResponseWriter, r *http.Request) {
+	if !a.authorizeDebug(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID == "" {
+		sessionID = "web-demo-01"
+	}
+	vehicleID := strings.TrimSpace(r.URL.Query().Get("vehicle_id"))
+	if vehicleID == "" {
+		vehicleID = a.cfg.DemoVehicleID
+	}
+	scope := contract.Scope{
+		UserID:    a.cfg.DemoUserID,
+		SessionID: sessionID,
+		VehicleID: vehicleID,
+	}
+	a.events.ServeSSE(w, r, scope)
 }
 
 func (a *demoApp) handleDebugState(w http.ResponseWriter, r *http.Request) {

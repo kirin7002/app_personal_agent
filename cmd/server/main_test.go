@@ -251,8 +251,13 @@ func postUtterance(t *testing.T, url, token string, payload map[string]string) c
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("utterance HTTP %d: %s", resp.StatusCode, string(raw))
 	}
+	var currentEvent string
 	for _, line := range strings.Split(string(raw), "\n") {
-		if data, ok := strings.CutPrefix(line, "data: "); ok {
+		if ev, ok := strings.CutPrefix(line, "event: "); ok {
+			currentEvent = strings.TrimSpace(ev)
+			continue
+		}
+		if data, ok := strings.CutPrefix(line, "data: "); ok && (currentEvent == "" || currentEvent == "speech.reply") {
 			var reply contract.SpeechReply
 			if err := json.Unmarshal([]byte(data), &reply); err != nil {
 				t.Fatalf("decode SSE reply: %v", err)
