@@ -16,6 +16,12 @@ const TARGET_CHUNK_BYTES = 1920; // 60 ms at 16 kHz PCM16LE (even, <= 64 KiB)
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const WAV_COALESCE_MS = 180; // Wait briefly for playback.stop before switching to live WebAudio streaming
 const OUTPUT_SAMPLE_RATE = 24000;
+const INPUT_SAMPLE_RATE = 16000;
+const VAD_PRE_ROLL_FRAMES = 12; // ~240 ms pre-roll at 20 ms per worklet frame
+const VAD_START_FRAMES = 3; // ~60 ms consecutive speech frames before triggering
+const VAD_SILENCE_END_MS = 850; // Natural pause duration to auto-commit utterance
+const VAD_POST_PLAYBACK_COOLDOWN_MS = 380; // Prevent speaker tail echo from triggering next turn
+const TURN_INFLIGHT_TIMEOUT_MS = 25000;
 
 // Tiny 1 ms silent 24 kHz mono WAV used to unlock Safari <audio> playback inside a user gesture.
 const SILENT_WAV_DATA_URI =
@@ -123,14 +129,31 @@ export function createTestChimePCM24k() {
   return pcm;
 }
 
+export function computePCM16RMS(bytes) {
+  const count = Math.floor((bytes?.byteLength || 0) / 2);
+  if (count <= 0) return 0;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, count * 2);
+  let sumSq = 0;
+  for (let i = 0; i < count; i++) {
+    const v = view.getInt16(i * 2, true) / 32768;
+    sumSq += v * v;
+  }
+  return Math.sqrt(sumSq / count);
+}
+
 export class VehicleVoiceClient {
   constructor({
     sessionId,
     vehicleId,
     wsUrl = '',
+    mode = 'ptt', // 'ptt' (hold-to-talk) | 'continuous' (hands-free local VAD)
     playbackCtx = null,
     audioEl = null,
     wavCoalesceMs = WAV_COALESCE_MS,
+    vadStartThreshold = 0.018,
+    vadStopThreshold = 0.011,
+    vadSilenceEndMs = VAD_SILENCE_END_MS,
+    vadCooldownMs = VAD_POST_PLAYBACK_COOLDOWN_MS,
     onStateChange = () => {},
     onReply = () => {},
     onResult = () => {},
@@ -139,7 +162,12 @@ export class VehicleVoiceClient {
     this.sessionId = sessionId;
     this.vehicleId = vehicleId;
     this.wsUrl = wsUrl;
+    this.mode = mode === 'continuous' ? 'continuous' : 'ptt';
     this.wavCoalesceMs = wavCoalesceMs;
+    this.vadStartThreshold = vadStartThreshold;
+    this.vadStopThreshold = vadStopThreshold;
+    this.vadSilenceEndMs = vadSilenceEndMs;
+    this.vadCooldownMs = vadCooldownMs;
     this.onStateChange = onStateChange;
     this.onReply = onReply;
     this.onResult = onResult;
@@ -174,6 +202,21 @@ export class VehicleVoiceClient {
     this.pendingChunks = [];
     this.pendingBytes = 0;
 
+    // Continuous hands-free VAD state
+    this.vadPaused = false;
+    this.listening = false;
+    this.turnInFlight = false;
+    this.turnInFlightTimer = null;
+    this.vadCooldownUntil = 0;
+    this.vadResumeTimer = null;
+    this.vadNoiseFloor = 0.005;
+    this.vadPreRoll = [];
+    this.vadSpeechStreak = 0;
+    this.vadSilenceMs = 0;
+    this.vadSpeechMs = 0;
+    this.vadTriggered = false;
+    this.workletRunning = false;
+
     // Downlink playback state
     this.activeSources = new Set();
     this.nextPlayTime = 0;
@@ -189,6 +232,10 @@ export class VehicleVoiceClient {
   emitState(extra = {}) {
     this.onStateChange({
       connected: this.connected,
+      mode: this.mode,
+      listening: this.listening,
+      vadPaused: this.vadPaused,
+      turnInFlight: this.turnInFlight,
       recording: this.recording,
       playing: this.playing,
       generation: this.generation,
@@ -330,8 +377,8 @@ export class VehicleVoiceClient {
       this.setMicEnabled(false);
 
       this.workletNode.port.onmessage = (event) => {
-        if (!this.recording || !this.connected || this.closed) return;
-        this.handleCapturedPCM(new Uint8Array(event.data));
+        if (!this.connected || this.closed) return;
+        this.onWorkletPCMFrame(new Uint8Array(event.data));
       };
 
       const url = this.wsUrl || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/voice/audio`;
@@ -398,6 +445,9 @@ export class VehicleVoiceClient {
         } else if (!this.closed) {
           this.connected = false;
           this.recording = false;
+          this.listening = false;
+          this.clearTurnInFlight();
+          this.setWorkletRunning(false);
           this.setMicEnabled(false);
           this.stopPlayback();
           this.emitState({ reason: 'disconnected' });
@@ -420,6 +470,8 @@ export class VehicleVoiceClient {
         }
         this.connected = true;
         this.generation = Number(frame.connection_generation) || this.generation + 1;
+        this.clearTurnInFlight();
+        this.syncContinuousCapture();
         this.emitState();
         onReadySettled?.(null);
         break;
@@ -427,7 +479,8 @@ export class VehicleVoiceClient {
 
       case 'session.reconnecting': {
         this.abortRecordingLocally();
-        this.stopPlayback();
+        this.clearTurnInFlight();
+        this.stopPlayback({ suppressResume: true });
         this.emitState({ reason: 'reconnecting' });
         break;
       }
@@ -435,6 +488,7 @@ export class VehicleVoiceClient {
       case 'session.error': {
         const msg = frame.reason || '语音会话不可用';
         this.abortRecordingLocally();
+        this.clearTurnInFlight();
         const err = new Error(msg);
         onReadySettled?.(err);
         this.onError(err);
@@ -442,6 +496,10 @@ export class VehicleVoiceClient {
       }
 
       case 'speech.reply': {
+        if (this.turnInFlight && !this.currentPlayback) {
+          const waitMs = frame.reply?.text ? 8000 : 2500;
+          this.armTurnInFlightTimeout(waitMs);
+        }
         if (frame.reply) this.onReply(frame.reply);
         break;
       }
@@ -453,9 +511,11 @@ export class VehicleVoiceClient {
 
       case 'playback.start': {
         if (this.currentPlayback && this.currentPlayback.stopReceived && this.currentPlayback.reason === 'completed' && !this.currentPlayback.acked) {
-          this.ackPlayback(this.currentPlayback);
+          this.ackPlayback(this.currentPlayback, { suppressResume: true });
         }
-        this.stopPlayback();
+        this.stopPlayback({ suppressResume: true });
+        this.clearTurnInFlightTimer();
+        this.pauseContinuousForPlayback();
         const id = frame.playback_id || '';
         const gen = Number(frame.playback_generation) || 0;
         const skip = id.startsWith('result-') && this.consumedResultPlaybacks.has(id);
@@ -694,11 +754,203 @@ export class VehicleVoiceClient {
     throw new Error('当前浏览器无可用音频输出设备');
   }
 
-  startTalking() {
+  setMode(mode) {
+    const next = mode === 'continuous' ? 'continuous' : 'ptt';
+    if (this.mode === next) return;
+    if (this.recording) {
+      this.stopTalking();
+    }
+    this.mode = next;
+    this.vadPaused = false;
+    this.resetVADBuffers();
+    if (this.connected && !this.closed) {
+      this.syncContinuousCapture();
+    } else {
+      this.listening = false;
+    }
+    this.emitState();
+  }
+
+  setVadPaused(paused) {
+    const next = Boolean(paused);
+    if (this.vadPaused === next) return;
+    this.vadPaused = next;
+    if (next && this.recording && this.vadTriggered) {
+      this.stopTalking();
+    }
+    this.resetVADBuffers();
+    this.syncContinuousCapture();
+    this.emitState();
+  }
+
+  setWorkletRunning(running) {
+    const next = Boolean(running);
+    if (this.workletRunning === next) return;
+    this.workletRunning = next;
+    this.workletNode?.port.postMessage({ type: next ? 'start' : 'stop' });
+  }
+
+  resetVADBuffers() {
+    this.vadPreRoll = [];
+    this.vadSpeechStreak = 0;
+    this.vadSilenceMs = 0;
+    this.vadSpeechMs = 0;
+    this.vadTriggered = false;
+  }
+
+  clearTurnInFlightTimer() {
+    if (this.turnInFlightTimer) {
+      clearTimeout(this.turnInFlightTimer);
+      this.turnInFlightTimer = null;
+    }
+  }
+
+  armTurnInFlightTimeout(ms = TURN_INFLIGHT_TIMEOUT_MS) {
+    this.clearTurnInFlightTimer();
+    this.turnInFlightTimer = setTimeout(() => {
+      this.turnInFlightTimer = null;
+      if (this.turnInFlight && !this.playing && !this.currentPlayback) {
+        this.turnInFlight = false;
+        this.syncContinuousCapture();
+        this.emitState();
+      }
+    }, ms);
+  }
+
+  clearTurnInFlight() {
+    this.clearTurnInFlightTimer();
+    this.turnInFlight = false;
+  }
+
+  pauseContinuousForPlayback() {
+    if (this.vadResumeTimer) {
+      clearTimeout(this.vadResumeTimer);
+      this.vadResumeTimer = null;
+    }
+    if (this.mode === 'continuous' && !this.recording) {
+      this.listening = false;
+      this.resetVADBuffers();
+      this.setWorkletRunning(false);
+      this.setMicEnabled(false);
+    }
+  }
+
+  scheduleContinuousResumeAfterPlayback() {
+    this.clearTurnInFlight();
+    if (this.mode !== 'continuous' || !this.connected || this.closed || this.vadPaused) {
+      this.listening = false;
+      return;
+    }
+    const cooldown = Math.max(0, this.vadCooldownMs);
+    this.vadCooldownUntil = Date.now() + cooldown;
+    if (this.vadResumeTimer) clearTimeout(this.vadResumeTimer);
+    if (cooldown === 0) {
+      this.syncContinuousCapture();
+      this.emitState();
+      return;
+    }
+    this.vadResumeTimer = setTimeout(() => {
+      this.vadResumeTimer = null;
+      this.syncContinuousCapture();
+      this.emitState();
+    }, cooldown);
+  }
+
+  syncContinuousCapture() {
+    if (this.vadResumeTimer) {
+      clearTimeout(this.vadResumeTimer);
+      this.vadResumeTimer = null;
+    }
+    const shouldListen =
+      this.connected &&
+      !this.closed &&
+      this.mode === 'continuous' &&
+      !this.vadPaused &&
+      !this.playing &&
+      !this.currentPlayback &&
+      !this.turnInFlight &&
+      !this.recording;
+
+    if (shouldListen) {
+      this.listening = true;
+      this.captureCtx?.resume?.().catch(() => {});
+      this.setMicEnabled(true);
+      this.setWorkletRunning(true);
+    } else if (!this.recording) {
+      this.listening = false;
+      this.resetVADBuffers();
+      this.setWorkletRunning(false);
+      this.setMicEnabled(false);
+    }
+  }
+
+  onWorkletPCMFrame(chunk) {
+    if (!chunk || chunk.length < 2) return;
+    if (this.mode === 'continuous' && !this.recording) {
+      this.processContinuousIdleFrame(chunk);
+      return;
+    }
+    if (!this.recording) return;
+    if (this.mode === 'continuous' && this.vadTriggered) {
+      this.processContinuousActiveFrame(chunk);
+    } else {
+      this.handleCapturedPCM(chunk);
+    }
+  }
+
+  processContinuousIdleFrame(chunk) {
+    if (!this.listening || this.vadPaused || this.playing || this.turnInFlight) return;
+    if (Date.now() < this.vadCooldownUntil) return;
+
+    const rms = computePCM16RMS(chunk);
+    const startThreshold = Math.max(this.vadStartThreshold, this.vadNoiseFloor * 2.8);
+
+    this.vadPreRoll.push(chunk);
+    if (this.vadPreRoll.length > VAD_PRE_ROLL_FRAMES) {
+      this.vadPreRoll.shift();
+    }
+
+    if (rms >= startThreshold) {
+      this.vadSpeechStreak += 1;
+      if (this.vadSpeechStreak >= VAD_START_FRAMES) {
+        const preRoll = this.vadPreRoll;
+        this.vadPreRoll = [];
+        this.vadSpeechStreak = 0;
+        this.vadSilenceMs = 0;
+        this.vadSpeechMs = (preRoll.length * 1000) / (INPUT_SAMPLE_RATE / 320);
+        this.beginVoiceTurn({ vadTriggered: true, preRoll });
+      }
+    } else {
+      this.vadSpeechStreak = 0;
+      this.vadNoiseFloor = Math.min(0.028, Math.max(0.002, this.vadNoiseFloor * 0.94 + rms * 0.06));
+    }
+  }
+
+  processContinuousActiveFrame(chunk) {
+    this.handleCapturedPCM(chunk);
+    if (!this.recording) return; // May have hit MAX_TURN_AUDIO_BYTES
+
+    const frameMs = (chunk.byteLength / (INPUT_SAMPLE_RATE * 2)) * 1000;
+    const rms = computePCM16RMS(chunk);
+    const stopThreshold = Math.max(this.vadStopThreshold, this.vadNoiseFloor * 1.9);
+
+    if (rms >= stopThreshold) {
+      this.vadSilenceMs = 0;
+      this.vadSpeechMs += frameMs;
+    } else {
+      this.vadSilenceMs += frameMs;
+      if (this.vadSilenceMs >= this.vadSilenceEndMs) {
+        this.stopTalking({ fromVAD: true });
+      }
+    }
+  }
+
+  beginVoiceTurn({ vadTriggered = false, preRoll = [] } = {}) {
     if (!this.connected || this.closed || this.recording || !this.generation) return;
 
     // Barge-in: immediately stop local playback when the user starts talking.
-    this.stopPlayback();
+    this.stopPlayback({ suppressResume: true });
+    this.clearTurnInFlight();
     this.unlockPlayback();
     this.captureCtx?.resume?.().catch(() => {});
 
@@ -712,15 +964,25 @@ export class VehicleVoiceClient {
     this.pendingChunks = [];
     this.pendingBytes = 0;
     this.recording = true;
+    this.listening = false;
+    this.vadTriggered = Boolean(vadTriggered);
     this.setMicEnabled(true);
+    this.setWorkletRunning(true);
 
     this.sendFrame({
       type: 'speech.started',
       voice_turn_id: this.voiceTurnId,
       connection_generation: this.generation,
     });
-    this.workletNode?.port.postMessage({ type: 'start' });
+
+    for (const chunk of preRoll) {
+      this.handleCapturedPCM(chunk);
+    }
     this.emitState();
+  }
+
+  startTalking() {
+    this.beginVoiceTurn({ vadTriggered: false });
   }
 
   handleCapturedPCM(chunk) {
@@ -782,11 +1044,13 @@ export class VehicleVoiceClient {
     });
   }
 
-  stopTalking() {
+  stopTalking({ fromVAD = false } = {}) {
     if (!this.recording) return;
     this.recording = false;
+    this.vadTriggered = false;
+    this.resetVADBuffers();
+    this.setWorkletRunning(false);
     this.setMicEnabled(false);
-    this.workletNode?.port.postMessage({ type: 'stop' });
 
     if (this.pendingBytes >= 2) {
       const tail = this.takeBufferedBytes(this.pendingBytes);
@@ -796,22 +1060,28 @@ export class VehicleVoiceClient {
     this.pendingBytes = 0;
 
     if (this.inputSeq > 0) {
+      this.turnInFlight = true;
+      this.armTurnInFlightTimeout();
       this.sendFrame({
         type: 'speech.ended',
         voice_turn_id: this.voiceTurnId,
         connection_generation: this.generation,
       });
-    } else {
+    } else if (!fromVAD) {
       this.onError(new Error('按键时间过短，未采集到有效语音，请按住后再说'));
+      this.syncContinuousCapture();
+    } else {
+      this.syncContinuousCapture();
     }
     this.emitState();
   }
 
   abortRecordingLocally() {
-    if (!this.recording) return;
     this.recording = false;
+    this.listening = false;
+    this.resetVADBuffers();
+    this.setWorkletRunning(false);
     this.setMicEnabled(false);
-    this.workletNode?.port.postMessage({ type: 'stop' });
     this.pendingChunks = [];
     this.pendingBytes = 0;
   }
@@ -861,7 +1131,7 @@ export class VehicleVoiceClient {
     source.start(startAt);
   }
 
-  ackPlayback(pb) {
+  ackPlayback(pb, { suppressResume = false } = {}) {
     if (!pb || pb.acked) return;
     pb.acked = true;
     if (pb.id.startsWith('result-')) {
@@ -875,9 +1145,12 @@ export class VehicleVoiceClient {
     if (this.currentPlayback === pb) {
       this.currentPlayback = null;
     }
+    if (!suppressResume) {
+      this.scheduleContinuousResumeAfterPlayback();
+    }
   }
 
-  stopPlayback() {
+  stopPlayback({ suppressResume = false } = {}) {
     if (this.currentPlayback?.streamTimer) {
       clearTimeout(this.currentPlayback.streamTimer);
       this.currentPlayback.streamTimer = null;
@@ -900,8 +1173,19 @@ export class VehicleVoiceClient {
     }
     this.activeSources.clear();
     this.nextPlayTime = 0;
+    const wasPlaying = this.playing;
     if (this.playing) {
       this.playing = false;
+    }
+    if (!suppressResume) {
+      if (this.currentPlayback && this.currentPlayback.stopReceived && this.currentPlayback.reason !== 'completed') {
+        this.currentPlayback = null;
+      }
+      if (wasPlaying || this.turnInFlight) {
+        this.scheduleContinuousResumeAfterPlayback();
+      }
+    }
+    if (wasPlaying) {
       this.emitState();
     }
   }
@@ -941,8 +1225,13 @@ export class VehicleVoiceClient {
     if (this.closed) return;
     this.closed = true;
     this.connected = false;
+    this.clearTurnInFlight();
+    if (this.vadResumeTimer) {
+      clearTimeout(this.vadResumeTimer);
+      this.vadResumeTimer = null;
+    }
     this.abortRecordingLocally();
-    this.stopPlayback();
+    this.stopPlayback({ suppressResume: true });
     try {
       this.socket?.close();
     } catch {}

@@ -98,11 +98,11 @@
         <div class="compose-actions">
           <div class="voice-controls">
             <button type="button" id="voiceConnectBtn" class="voice-button" aria-pressed="false">◉ 连接语音</button>
-            <button type="button" id="pttBtn" class="ptt-button" disabled aria-pressed="false" title="连接语音后按住说话，松开发送（支持空格键或切换点击模式）">按住说话</button>
-            <label class="ptt-mode-toggle" title="切换按住说话或点击开始/结束模式">
-              <input type="checkbox" id="pttClickMode">
-              <span>点击切换</span>
-            </label>
+            <div class="voice-mode-switch" role="group" aria-label="语音对话模式">
+              <button type="button" id="modePttBtn" class="mode-seg active" aria-pressed="true" title="按住按钮或空格键说话，松开发送">按住说话</button>
+              <button type="button" id="modeContinuousBtn" class="mode-seg" aria-pressed="false" title="免按键自动检测说话与断句，播报结束后自动恢复监听">持续对话</button>
+            </div>
+            <button type="button" id="pttBtn" class="ptt-button" disabled aria-pressed="false" title="按住说话（支持空格键）；持续对话模式下可暂停/恢复监听或打断播报">按住说话</button>
           </div>
           <span class="input-hint">Enter 发送 · Shift + Enter 换行</span>
           <button type="submit" id="sendButton" class="primary">发送 ↗</button>

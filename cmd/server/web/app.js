@@ -67,7 +67,11 @@ const state = {
 
   // Voice controller (loaded lazily from ./voice-client.js in W06)
   voiceClient: null,
+  voiceMode: 'ptt', // 'ptt' | 'continuous'
   voiceConnected: false,
+  voiceListening: false,
+  voiceVadPaused: false,
+  voiceTurnInFlight: false,
   voiceRecording: false,
   voicePlaying: false,
   voiceGeneration: 0,
@@ -1332,6 +1336,7 @@ async function toggleVoiceConnection() {
     const client = new mod.VehicleVoiceClient({
       sessionId: state.session.session_id,
       vehicleId: state.session.vehicle_id,
+      mode: state.voiceMode,
       playbackCtx: unlocked.playbackCtx,
       audioEl: unlocked.audioEl,
       onStateChange: (vState) => updateVoiceUI(vState),
@@ -1352,39 +1357,107 @@ async function toggleVoiceConnection() {
   }
 }
 
-function updateVoiceUI({ connected, recording, playing, generation, reason } = {}) {
+function setVoiceMode(mode) {
+  const next = mode === 'continuous' ? 'continuous' : 'ptt';
+  state.voiceMode = next;
+  if (state.voiceClient) {
+    state.voiceClient.setMode(next);
+  }
+  updateVoiceUI({
+    connected: state.voiceConnected,
+    mode: state.voiceMode,
+    listening: state.voiceClient ? state.voiceClient.listening : false,
+    vadPaused: state.voiceClient ? state.voiceClient.vadPaused : false,
+    turnInFlight: state.voiceClient ? state.voiceClient.turnInFlight : false,
+    recording: state.voiceRecording,
+    playing: state.voicePlaying,
+    generation: state.voiceGeneration,
+  });
+}
+
+function updateVoiceUI({ connected, mode, listening, vadPaused, turnInFlight, recording, playing, generation, reason } = {}) {
+  if (mode) state.voiceMode = mode === 'continuous' ? 'continuous' : 'ptt';
   state.voiceConnected = Boolean(connected);
+  state.voiceListening = Boolean(listening);
+  state.voiceVadPaused = Boolean(vadPaused);
+  state.voiceTurnInFlight = Boolean(turnInFlight);
   state.voiceRecording = Boolean(recording);
   state.voicePlaying = Boolean(playing);
   if (generation != null) state.voiceGeneration = generation;
 
+  const isContinuous = state.voiceMode === 'continuous';
+  $('modePttBtn').classList.toggle('active', !isContinuous);
+  $('modePttBtn').setAttribute('aria-pressed', String(!isContinuous));
+  $('modeContinuousBtn').classList.toggle('active', isContinuous);
+  $('modeContinuousBtn').setAttribute('aria-pressed', String(isContinuous));
+
   $('voiceConnectBtn').setAttribute('aria-pressed', String(state.voiceConnected));
   $('voiceConnectBtn').textContent = state.voiceConnected ? '◉ 断开语音' : '◉ 连接语音';
-  $('pttBtn').disabled = !state.voiceConnected;
-  $('pttBtn').setAttribute('aria-pressed', String(state.voiceRecording));
-  $('pttBtn').textContent = state.voiceRecording
-    ? ($('pttClickMode').checked ? '点击结束发送' : '正在录音 · 松开发送')
-    : ($('pttClickMode').checked ? '点击开始说话' : '按住说话');
 
-  $('channelBadge').textContent = state.voiceConnected ? '语音 + 文字' : '文字入口';
+  const pttBtn = $('pttBtn');
+  pttBtn.disabled = !state.voiceConnected;
+  pttBtn.setAttribute('aria-pressed', String(state.voiceRecording));
+  pttBtn.classList.toggle('is-listening', state.voiceConnected && isContinuous && state.voiceListening && !state.voiceRecording);
+
+  if (isContinuous) {
+    if (state.voiceRecording) {
+      pttBtn.textContent = '正在收音 · 点击发送';
+    } else if (state.voicePlaying) {
+      pttBtn.textContent = '打断并说话';
+    } else if (state.voiceVadPaused) {
+      pttBtn.textContent = '恢复持续监听';
+    } else if (state.voiceTurnInFlight) {
+      pttBtn.textContent = '处理中 · 点击插话';
+    } else {
+      pttBtn.textContent = state.voiceConnected ? '监听中 · 暂停' : '持续对话';
+    }
+  } else {
+    pttBtn.textContent = state.voiceRecording ? '正在录音 · 松开发送' : '按住说话';
+  }
+
+  $('channelBadge').textContent = state.voiceConnected
+    ? (isContinuous ? '持续语音 + 文字' : '按住语音 + 文字')
+    : '文字入口';
   setStatusDot(
     'voiceDot',
     'voiceStatus',
     state.voiceConnected ? 'ready' : state.config?.voice_enabled ? 'warn' : '',
-    state.voiceConnected ? (state.voiceRecording ? '收音中' : state.voicePlaying ? '播报中' : '已连接') : (state.config?.voice_enabled ? '已就绪 · 待连接' : '未配置 Key')
+    state.voiceConnected
+      ? (state.voiceRecording
+          ? '收音中'
+          : state.voicePlaying
+            ? '播报中'
+            : isContinuous && state.voiceListening
+              ? '持续监听'
+              : '已连接')
+      : (state.config?.voice_enabled ? '已就绪 · 待连接' : '未配置 Key')
   );
 
   const bar = $('voiceBar');
   bar.hidden = !state.voiceConnected;
   const indicator = $('voiceIndicator');
-  indicator.className = 'voice-indicator' + (state.voiceRecording ? ' recording' : state.voicePlaying ? ' playing' : '');
+  indicator.className =
+    'voice-indicator' +
+    (state.voiceRecording
+      ? ' recording'
+      : state.voicePlaying
+        ? ' playing'
+        : isContinuous && state.voiceListening
+          ? ' listening'
+          : '');
   $('voiceBarText').textContent = state.voiceRecording
-    ? '正在采集 16 kHz PCM 语音…'
+    ? (isContinuous ? '检测到说话 · 停顿自动发送…' : '正在采集 16 kHz PCM 语音…')
     : state.voicePlaying
-      ? '正在播报 24 kHz 语音回复（起讲可立即打断）'
+      ? (isContinuous ? '正在播报语音回复（播完自动恢复监听，也可点击打断）' : '正在播报 24 kHz 语音回复（起讲可立即打断）')
       : reason === 'reconnecting'
         ? '语音连接重建中，请稍候重说…'
-        : '语音通道已连接（按住按钮或按住空格键说话）';
+        : isContinuous
+          ? (state.voiceVadPaused
+              ? '持续对话已暂停，点击「恢复持续监听」继续'
+              : state.voiceTurnInFlight
+                ? '正在等待本轮回复…'
+                : '持续对话监听中 · 直接开口说话，停顿后自动发送')
+          : '按住说话模式已连接（按住按钮或按住空格键说话）';
   $('voiceGenBadge').textContent = state.voiceGeneration ? `gen #${state.voiceGeneration}` : '';
   $('stopPlaybackBtn').hidden = !state.voicePlaying;
 }
@@ -1447,37 +1520,37 @@ function wireEvents() {
     state.voiceClient?.stopPlayback?.();
   });
 
-  // PTT interactions: hold-to-talk OR click-toggle
+  $('modePttBtn').addEventListener('click', () => setVoiceMode('ptt'));
+  $('modeContinuousBtn').addEventListener('click', () => setVoiceMode('continuous'));
+
+  // Voice button interactions: hold-to-talk (PTT) OR hands-free continuous controls
   const ptt = $('pttBtn');
   ptt.addEventListener('pointerdown', (e) => {
     if (!state.voiceConnected || !state.voiceClient) return;
-    if ($('pttClickMode').checked) return;
+    if (state.voiceMode !== 'ptt') return;
     e.preventDefault();
     ptt.setPointerCapture?.(e.pointerId);
     state.voiceClient.startTalking();
   });
   const endHold = () => {
     if (!state.voiceConnected || !state.voiceClient) return;
-    if ($('pttClickMode').checked) return;
+    if (state.voiceMode !== 'ptt') return;
     if (state.voiceRecording) state.voiceClient.stopTalking();
   };
   ptt.addEventListener('pointerup', endHold);
   ptt.addEventListener('pointercancel', endHold);
   ptt.addEventListener('click', () => {
-    if (!state.voiceConnected || !state.voiceClient || !$('pttClickMode').checked) return;
-    if (state.voiceRecording) state.voiceClient.stopTalking();
-    else state.voiceClient.startTalking();
-  });
-  $('pttClickMode').addEventListener('change', () => {
-    updateVoiceUI({
-      connected: state.voiceConnected,
-      recording: state.voiceRecording,
-      playing: state.voicePlaying,
-      generation: state.voiceGeneration,
-    });
+    if (!state.voiceConnected || !state.voiceClient || state.voiceMode !== 'continuous') return;
+    if (state.voiceRecording) {
+      state.voiceClient.stopTalking();
+    } else if (state.voicePlaying || state.voiceTurnInFlight) {
+      state.voiceClient.startTalking();
+    } else {
+      state.voiceClient.setVadPaused(!state.voiceVadPaused);
+    }
   });
 
-  // Spacebar PTT when textarea is not focused
+  // Spacebar PTT (or manual barge-in in continuous mode) when input is not focused
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' || e.repeat || !state.voiceConnected || !state.voiceClient) return;
     const tag = document.activeElement?.tagName;
