@@ -1,0 +1,208 @@
+{
+  "version": "2026.1",
+  "operations": [
+    {
+      "device": "window",
+      "tool": "close",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "car_window_ctrl",
+      "title": "关闭车窗",
+      "category": "车身控制",
+      "description": "关闭指定位置的车窗",
+      "aliases": ["关窗", "关闭车窗", "升窗", "摇上车窗", "window close", "左前窗", "右前窗", "左后窗", "右后窗"],
+      "utterances": ["把车窗关一下", "把左后窗关上", "关闭右前窗", "左后窗关上"],
+      "anti_examples": ["车窗关了吗", "车窗状态", "车窗开着吗", "天窗", "遮阳帘"],
+      "fields": [
+        {
+          "name": "position",
+          "type": "string",
+          "required": true,
+          "enum": ["front_left", "front_right", "rear_left", "rear_right"],
+          "enum_labels": {
+            "front_left": ["左前窗", "左前", "主驾窗", "驾驶座窗", "左前车窗"],
+            "front_right": ["右前窗", "右前", "副驾窗", "右前车窗"],
+            "rear_left": ["左后窗", "左后", "左后车窗"],
+            "rear_right": ["右后窗", "右后", "右后车窗"]
+          },
+          "question": "要关哪扇车窗？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "front_left": ["左前窗", "左前", "主驾窗", "驾驶座窗", "左前车窗"],
+              "front_right": ["右前窗", "右前", "副驾窗", "右前车窗"],
+              "rear_left": ["左后窗", "左后", "左后车窗"],
+              "rear_right": ["右后窗", "右后", "右后车窗"]
+            }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["车窗", "窗户", "玻璃", "左前窗", "右前窗", "左后窗", "右后窗", "主驾窗", "副驾窗"],
+        "positive_verbs": ["关", "升", "摇上", "闭"],
+        "conflict_verbs": ["开", "降", "摇下"]
+      }
+    },
+    {
+      "device": "window",
+      "tool": "open",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "car_window_ctrl",
+      "title": "打开车窗",
+      "category": "车身控制",
+      "description": "打开指定位置的车窗",
+      "aliases": ["开窗", "打开车窗", "降窗", "摇下车窗", "window open", "左前窗", "右前窗", "左后窗", "右后窗"],
+      "utterances": ["把车窗打开", "把左后窗打开", "打开右前窗", "降下左前窗"],
+      "anti_examples": ["车窗关了吗", "车窗状态", "车窗开着吗", "天窗", "遮阳帘"],
+      "fields": [
+        {
+          "name": "position",
+          "type": "string",
+          "required": true,
+          "enum": ["front_left", "front_right", "rear_left", "rear_right"],
+          "enum_labels": {
+            "front_left": ["左前窗", "左前", "主驾窗", "驾驶座窗", "左前车窗"],
+            "front_right": ["右前窗", "右前", "副驾窗", "右前车窗"],
+            "rear_left": ["左后窗", "左后", "左后车窗"],
+            "rear_right": ["右后窗", "右后", "右后车窗"]
+          },
+          "question": "要打开哪扇车窗？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "front_left": ["左前窗", "左前", "主驾窗", "驾驶座窗", "左前车窗"],
+              "front_right": ["右前窗", "右前", "副驾窗", "右前车窗"],
+              "rear_left": ["左后窗", "左后", "左后车窗"],
+              "rear_right": ["右后窗", "右后", "右后车窗"]
+            }
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["车窗", "窗户", "玻璃", "左前窗", "右前窗", "左后窗", "右后窗", "主驾窗", "副驾窗"],
+        "positive_verbs": ["开", "降", "摇下"],
+        "conflict_verbs": ["关", "升", "摇上"]
+      }
+    },
+    {
+      "device": "window",
+      "tool": "get_status",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "query_car_status",
+      "title": "查询车窗状态",
+      "category": "车况查询",
+      "description": "查询一扇或多扇车窗的开关状态",
+      "aliases": ["查车窗", "车窗状态", "车窗关了吗", "车窗开着吗", "四窗状态", "window status"],
+      "utterances": ["左后窗关了吗", "左后窗开着吗", "车窗都关了吗", "看看四个车窗关好没"],
+      "fields": [
+        {
+          "name": "positions",
+          "type": "array_string",
+          "required": true,
+          "enum": ["front_left", "front_right", "rear_left", "rear_right"],
+          "min_items": 1,
+          "question": "要查询哪扇车窗的状态？"
+        }
+      ]
+    },
+    {
+      "device": "hvac",
+      "tool": "set_temperature",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "ac_ctrl",
+      "title": "设置空调温度",
+      "category": "空调舒适",
+      "description": "设置车内空调目标温度",
+      "aliases": ["空调温度", "设温", "调温度", "几度", "调高温度", "调低温度", "hvac temperature"],
+      "utterances": ["把空调调到25度", "空调设成24度", "温度调到22度"],
+      "anti_examples": ["空调开着吗", "现在空调几度", "空调状态"],
+      "fields": [
+        {
+          "name": "temperature_c",
+          "type": "number",
+          "required": true,
+          "dynamic_bound": "temperature_c",
+          "question": "空调要调到几度？",
+          "extractor": {
+            "kind": "number",
+            "unit_pattern": "(?:度|℃|°c|c)?",
+            "min": 10,
+            "max": 40,
+            "allow_bare_number": true
+          }
+        }
+      ],
+      "guard": {
+        "device_keywords": ["空调", "温度", "冷风", "暖风", "制冷", "制热", "度"],
+        "positive_verbs": ["调", "设", "开", "改", "升", "降", "高", "低"]
+      }
+    },
+    {
+      "device": "hvac",
+      "tool": "set_climate",
+      "mcp_tool": "dispatch_vehicle_command",
+      "downstream_tool": "ac_ctrl",
+      "title": "控制空调开关与温度",
+      "category": "空调舒适",
+      "description": "同时控制空调开关状态与目标温度",
+      "aliases": ["空调", "开空调", "关空调", "冷风", "暖风", "制热", "制冷", "hvac climate"],
+      "utterances": ["打开空调并调到25度", "把空调打开", "空调开一下", "打开空调调到24度"],
+      "anti_examples": ["空调开着吗", "现在空调几度", "空调状态"],
+      "fields": [
+        {
+          "name": "power",
+          "type": "string",
+          "required": true,
+          "enum": ["on", "off"],
+          "enum_labels": {
+            "on": ["打开", "开启", "打开空调", "开空调", "空调开"],
+            "off": ["关闭", "关闭空调", "关空调", "空调关"]
+          },
+          "question": "要打开还是关闭空调？",
+          "extractor": {
+            "kind": "enum_alias",
+            "value_aliases": {
+              "on": ["打开空调", "开空调", "开启空调", "空调开", "打开", "开启"],
+              "off": ["关闭空调", "关空调", "空调关", "关闭"]
+            }
+          }
+        },
+        {
+          "name": "temperature_c",
+          "type": "number",
+          "required": true,
+          "dynamic_bound": "temperature_c",
+          "question": "空调要调到几度？",
+          "extractor": {
+            "kind": "number",
+            "unit_pattern": "(?:度|℃|°c|c)?",
+            "min": 10,
+            "max": 40,
+            "allow_bare_number": true
+          }
+        }
+      ],
+      "missing_questions": {
+        "power+temperature_c": "请确认空调要打开还是关闭，以及调到几度？",
+        "power": "要打开还是关闭空调？",
+        "temperature_c": "空调要调到几度？"
+      },
+      "guard": {
+        "device_keywords": ["空调", "冷风", "暖风", "制冷", "制热", "温度"],
+        "positive_verbs": ["打开", "开", "开启", "关闭", "关", "调", "设"]
+      }
+    },
+    {
+      "device": "hvac",
+      "tool": "get_status",
+      "mcp_tool": "get_vehicle_status",
+      "downstream_tool": "car_airconditioner_status",
+      "title": "查询空调状态",
+      "category": "车况查询",
+      "description": "查询空调当前开关状态与设定温度",
+      "aliases": ["空调状态", "空调开着吗", "现在空调几度", "hvac status"],
+      "utterances": ["空调开着吗", "现在空调设定多少度"],
+      "status_signals": ["hvac.power", "hvac.temperature_c"],
+      "fields": []
+    }
+  ]
+}

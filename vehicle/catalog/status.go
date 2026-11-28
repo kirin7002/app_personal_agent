@@ -117,7 +117,7 @@ func (s *Service) GetVehicleStatus(ctx context.Context, scope contract.Scope, in
 		}
 	}
 
-	signalNames, err := signalsForStatusQuery(input.Operation, outcome.Normalized)
+	signalNames, err := signalsForStatusQuery(spec, outcome.Normalized)
 	if err != nil {
 		return contract.VehicleStatusResult{}, err
 	}
@@ -128,22 +128,39 @@ func (s *Service) GetVehicleStatus(ctx context.Context, scope contract.Scope, in
 	return contract.VehicleStatusResult{Signals: signals}, nil
 }
 
-func signalsForStatusQuery(op contract.Operation, normalized map[string]any) ([]string, error) {
-	switch op {
-	case contract.Operation{Device: "window", Tool: "get_status"}:
+func signalsForStatusQuery(spec OperationSpec, normalized map[string]any) ([]string, error) {
+	if spec.Operation == (contract.Operation{Device: "window", Tool: "get_status"}) {
 		positions, _ := normalized["positions"].([]string)
 		names := make([]string, 0, len(positions))
 		for _, pos := range positions {
 			names = append(names, "window."+pos)
 		}
 		return names, nil
-	case contract.Operation{Device: "hvac", Tool: "get_status"}:
-		return []string{"hvac.power", "hvac.temperature_c"}, nil
-	default:
-		return nil, &contract.BusinessError{
-			Code:    contract.CapabilityUnavailable,
-			Message: fmt.Sprintf("unsupported status operation %s.%s", op.Device, op.Tool),
+	}
+	if len(spec.StatusSignals) > 0 {
+		// Support optional local post-filtering by "names" (e.g., car_airconditioner_status).
+		if requested, ok := normalized["names"].([]string); ok && len(requested) > 0 {
+			allowed := make(map[string]bool, len(spec.StatusSignals))
+			for _, sig := range spec.StatusSignals {
+				allowed[sig] = true
+			}
+			filtered := make([]string, 0, len(requested))
+			for _, name := range requested {
+				if allowed[name] {
+					filtered = append(filtered, name)
+				}
+			}
+			if len(filtered) > 0 {
+				return filtered, nil
+			}
 		}
+		out := make([]string, len(spec.StatusSignals))
+		copy(out, spec.StatusSignals)
+		return out, nil
+	}
+	return nil, &contract.BusinessError{
+		Code:    contract.CapabilityUnavailable,
+		Message: fmt.Sprintf("unsupported status operation %s.%s", spec.Operation.Device, spec.Operation.Tool),
 	}
 }
 
